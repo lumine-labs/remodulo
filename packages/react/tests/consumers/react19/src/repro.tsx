@@ -36,39 +36,15 @@ import type { ComponentType, ReactElement, ReactNode } from "react"
 import {
     App,
     AppProvider,
-    CYCLE_ERROR_CODE,
-    Container,
-    ContainerEvent,
-    CycleError,
-    INJECTION_CONTEXT_ERROR_CODE,
-    InjectionContextError,
     Module,
     ModuleProvider,
     ModuleStatus,
     ModuleTraversal,
     PropsRef,
-    REGISTRATION_ERROR_CODE,
-    RESOLUTION_ERROR_CODE,
     Ref,
     RefMap,
-    RegistrationError,
-    RegistrationMode,
-    ResolutionError,
-    ResolveAllMode,
-    ResolveMode,
-    Resolver,
-    Scope,
-    Token,
     createFeature,
     createModuleComponent,
-    describeToken,
-    inject,
-    injectAll,
-    injectContainer,
-    injectOptional,
-    injectResolver,
-    makeTokenizer,
-    runInInjectionContext,
     useModule,
     useModuleContext,
     useModuleRebuild,
@@ -84,28 +60,12 @@ import {
 // the React package re-exports: a consumer reading a registration snapshot off a resolver it got from
 // `useResolver()` never imported `@remodulo/container` by hand.
 import type {
-    AbstractConstructor,
-    AfterMaterializeEvent,
-    AfterResolutionEvent,
-    AliasEntrySnapshot,
     AppProviderProps,
-    BeforeMaterializeEvent,
-    BeforeResolutionEvent,
-    BindingEntrySnapshot,
-    ClassKey,
     ClassProvider,
-    Constructor,
-    ContainerEventListener,
-    ContainerEventPayload,
-    ModuleConfig,
-    PropsBridgeOptions,
-    EntryMetadata,
-    EntrySnapshot,
     ExistingProvider,
     FactoryProvider,
     Feature,
-    Frame,
-    InjectionToken,
+    ModuleConfig,
     ModuleContextValue,
     ModuleHook,
     ModuleHooks,
@@ -113,25 +73,67 @@ import type {
     ModuleProviderProps,
     ModuleStatus as ModuleStatusFromTypesEntry,
     PropsAdapter,
+    PropsBridgeOptions,
     Provider,
     ProviderInput,
     ProviderLifecycle,
-    RequestCache,
     SelfClassProvider,
     TokenClassProvider,
-    TokenOptions,
-    Tokenizer,
     UsePropsRefOptions,
     UsePropsRefResult,
     ValueProvider,
 } from "@remodulo/react/types"
 
-// The kernel, reached directly — and this is the ONLY line in the file that does it. `Provider` is the
-// one name where the two packages genuinely differ: react derives its own with a `lazy` key, so the
-// kernel's form has to be named through the kernel to be compared with it at all. Everything else a
-// consumer could want from the kernel arrives through `@remodulo/react` above; see the boundary section
-// near the bottom.
-import type { Provider as KernelProvider } from "@remodulo/container/types"
+// The kernel, reached directly — which is now the ONLY way to reach it. `@remodulo/container` is a peer
+// dependency and re-exports nothing through `@remodulo/react`, so a consumer imports kernel tools from
+// the kernel and react tools from react. `Provider` is the one name the two packages both spell: react
+// derives its own with a `lazy` key, so the kernel's form is aliased here to be compared with it.
+import {
+    CYCLE_ERROR_CODE,
+    Container,
+    ContainerEvent,
+    CycleError,
+    INJECTION_CONTEXT_ERROR_CODE,
+    InjectionContextError,
+    REGISTRATION_ERROR_CODE,
+    RESOLUTION_ERROR_CODE,
+    RegistrationError,
+    RegistrationMode,
+    ResolutionError,
+    ResolveAllMode,
+    ResolveMode,
+    Resolver,
+    Scope,
+    describeToken,
+    inject,
+    injectAll,
+    injectContainer,
+    injectOptional,
+    injectResolver,
+    makeTokenizer,
+    runInInjectionContext,
+} from "@remodulo/container"
+
+import type {
+    AbstractConstructor,
+    AfterMaterializeEvent,
+    AfterResolutionEvent,
+    AliasEntrySnapshot,
+    BeforeMaterializeEvent,
+    BeforeResolutionEvent,
+    BindingEntrySnapshot,
+    ClassKey,
+    Constructor,
+    ContainerEventListener,
+    ContainerEventPayload,
+    EntryMetadata,
+    EntrySnapshot,
+    Frame,
+    InjectionToken,
+    Provider as KernelProvider,
+    RequestCache,
+    Tokenizer,
+} from "@remodulo/container/types"
 
 // Assertion helpers — zero dependency on purpose.
 // ========================================
@@ -148,6 +150,7 @@ type HasKey<T, K extends PropertyKey> = K extends keyof T ? true : false
 // a missing name cannot be imported, and an import that fails is a compile error rather than an
 // assertion, so the negative space needs a shape to ask questions of.
 type ReactEntry = typeof import("@remodulo/react")
+type ReactTypesEntry = typeof import("@remodulo/react/types")
 type ContainerEntry = typeof import("@remodulo/container")
 
 // The gate is only worth something if the strict flags are really in effect — a tsconfig regression
@@ -193,21 +196,27 @@ interface Plugin {
 // Tokens
 // ========================================
 
-const CONFIG = Token<AppConfig>("consumer.config")
+// There is no global tokenizer any more: a consumer mints its own, and the namespace it names is what
+// keeps its tokens from colliding with another library's. Both parameters are required — the namespace
+// on the factory, the name on the mint — and there is no options bag on either.
+const consumerTokenizer = makeTokenizer("@consumer")
+type _TokenizerShape = Expect<Equals<typeof consumerTokenizer, Tokenizer>>
+type _MakeTokenizerNeedsANamespace = Expect<Equals<Parameters<typeof makeTokenizer>, [string]>>
+type _TokenizerTakesOnlyAName = Expect<Equals<Parameters<Tokenizer>, [string]>>
+
+const CONFIG = consumerTokenizer<AppConfig>("config")
 type _ConfigTokenIsTyped = Expect<Equals<typeof CONFIG, InjectionToken<AppConfig>>>
 type _ConfigTokenIsNotAny = Expect<Not<IsAny<typeof CONFIG>>>
 
-const PLUGIN = Token<Plugin>("consumer.plugin")
-const LOGGER = Token<Logger>("consumer.logger")
+const PLUGIN = consumerTokenizer<Plugin>("plugin")
+const LOGGER = consumerTokenizer<Logger>("logger")
 
-const appTokenizer = makeTokenizer("@consumer")
+const appTokenizer = makeTokenizer("@consumer.feature")
 const FEATURE_LOGGER = appTokenizer<Logger>("feature.logger")
 type _FeatureLoggerIsTyped = Expect<Equals<typeof FEATURE_LOGGER, InjectionToken<Logger>>>
 
-type _TokenizerShape = Expect<Equals<typeof appTokenizer, Tokenizer>>
-
-const tokenOptions: TokenOptions = { allowDuplicate: true }
-const DUPLICATE_PLUGIN = Token<Plugin>("consumer.plugin", tokenOptions)
+// Minting a name twice is no longer refused — it is the same declaration, and so the same token.
+const DUPLICATE_PLUGIN = consumerTokenizer<Plugin>("plugin")
 type _DuplicatePluginIsTyped = Expect<Equals<typeof DUPLICATE_PLUGIN, InjectionToken<Plugin>>>
 
 // An abstract class is a legal token too — that is what `AbstractConstructor` is in the union for.
@@ -793,7 +802,8 @@ type _ScopeValues = Expect<
         }
     >
 >
-type _ScopeOnTypesSubpath = Expect<Equals<import("@remodulo/react/types").Scope, Scope>>
+type _ScopeOnKernelTypesSubpath = Expect<Equals<import("@remodulo/container/types").Scope, Scope>>
+type _NoScopeOnReactTypes = Expect<Not<HasKey<ReactTypesEntry, "Scope">>>
 
 const transientProvider: ClassProvider<ApiClient> = { provide: ApiClient, useClass: ApiClient, scope: Scope.Transient }
 const requestProvider: ClassProvider<ApiClient> = { provide: ApiClient, useClass: ApiClient, scope: Scope.Request }
@@ -979,7 +989,7 @@ void provideLessMultiValue
 // mode the collection reads have is spelled at the call site, where the read's own enum types it.
 
 const collectingFactory: FactoryProvider<Plugin[]> = {
-    provide: Token<Plugin[]>("consumer.plugin.snapshot"),
+    provide: consumerTokenizer<Plugin[]>("plugin.snapshot"),
     useFactory: () => injectAll(PLUGIN, "nearest"),
 }
 void collectingFactory
@@ -987,7 +997,7 @@ void collectingFactory
 // The three widths, and the one that only a body read can ask for: `chained` was expressible on the array's
 // collection arm too, but the single arm never had it, and `injectAll` is now the only place it is spelled.
 const chainedCollectingFactory: FactoryProvider<Plugin[]> = {
-    provide: Token<Plugin[]>("consumer.plugin.chained"),
+    provide: consumerTokenizer<Plugin[]>("plugin.chained"),
     useFactory: () => injectAll(PLUGIN, ResolveAllMode.Chained),
 }
 void chainedCollectingFactory
@@ -1097,7 +1107,7 @@ const userAdapter: PropsAdapter<UserVM> = {
     },
 }
 
-const USER_VM = Token<PropsRef<UserVM>>("consumer.user-vm")
+const USER_VM = consumerTokenizer<PropsRef<UserVM>>("user-vm")
 
 // createModuleComponent
 // ========================================
@@ -1838,51 +1848,60 @@ type _FrameRequest = Expect<Equals<typeof frame.request, RequestCache>>
 type _FrameChain = Expect<Equals<typeof frame.chain, readonly InjectionToken[]>>
 type _RequestCache = Expect<Equals<RequestCache, Map<object, unknown>>>
 
-// The package boundary — ONE import path.
+// The package boundary — ONE OWNER PER NAME.
 // ========================================
 //
-// REVERSED. This section used to pin the opposite: the typed errors were the kernel's alone, and a `catch`
-// block that wanted to branch on `error.code` reached for `@remodulo/container` itself. The argument was
-// one-owner-per-name keeping `instanceof` honest — but a re-export IS the same class object, so nothing
-// about `instanceof` was ever at risk, and the rule bought a second import path for no protection.
+// This section has now been ruled both ways, and the current ruling is the original one restored. 0.11.0
+// re-exported the kernel's whole surface through this package on the argument that a peer dependency
+// should never need a second import path. 0.12.0 reverses it: the kernel is already installed beside this
+// package, so a consumer naming it directly costs nothing, while the re-export bought a second spelling
+// for every kernel name — two places for a name to drift, and two places to look for its owner.
 //
-// The kernel is a PEER dependency: a consumer has it whether it asks or not, and asking it to name the
-// package twice is asking it to care where a tool happens to live. So the React entry now re-exports the
-// kernel's entire public surface, and every name below is asserted on BOTH — same name, same object.
-//
-// The `Equals` pins are the sharp half: `HasKey` would pass for a re-declared look-alike, where these fail
-// unless the two entry points hand out the identical thing.
+// The one-import-path rule is REVERSED. React re-exports nothing whose implementation lives in the
+// kernel: `@remodulo/container` is a peer dependency, already installed beside this package, so a second
+// spelling for every kernel name bought nothing but drift. The test is the SOURCE — if the kernel
+// implements it, react does not export it — and it is pinned in both directions, because "absent from
+// react" is only half a contract if the name is not reachable at all.
+type KernelOwned = [
+    "Container",
+    "ContainerEvent",
+    "RegistrationMode",
+    "ResolveAllMode",
+    "ResolveMode",
+    "Scope",
+    "Resolver",
+    "inject",
+    "injectAll",
+    "injectContainer",
+    "injectOptional",
+    "injectResolver",
+    "runInInjectionContext",
+    "makeTokenizer",
+    "describeToken",
+    "CycleError",
+    "RegistrationError",
+    "ResolutionError",
+    "InjectionContextError",
+    "CYCLE_ERROR_CODE",
+    "REGISTRATION_ERROR_CODE",
+    "RESOLUTION_ERROR_CODE",
+    "INJECTION_CONTEXT_ERROR_CODE",
+]
 
-type _RegistrationErrorIsTheKernels = Expect<Equals<ReactEntry["RegistrationError"], ContainerEntry["RegistrationError"]>>
-type _ResolutionErrorIsTheKernels = Expect<Equals<ReactEntry["ResolutionError"], ContainerEntry["ResolutionError"]>>
-type _CycleErrorIsTheKernels = Expect<Equals<ReactEntry["CycleError"], ContainerEntry["CycleError"]>>
-type _InjectionContextErrorIsTheKernels = Expect<
-    Equals<ReactEntry["InjectionContextError"], ContainerEntry["InjectionContextError"]>
->
-type _ErrorCodesAreTheKernels = Expect<
-    Equals<ReactEntry["REGISTRATION_ERROR_CODE"], ContainerEntry["REGISTRATION_ERROR_CODE"]>
->
-type _DescribeTokenIsTheKernels = Expect<Equals<ReactEntry["describeToken"], ContainerEntry["describeToken"]>>
-type _InjectResolverIsTheKernels = Expect<Equals<ReactEntry["injectResolver"], ContainerEntry["injectResolver"]>>
-type _ContainerEventIsTheKernels = Expect<Equals<ReactEntry["ContainerEvent"], ContainerEntry["ContainerEvent"]>>
+type AbsentFromReact<Names extends readonly string[]> = {
+    [I in keyof Names]: Names[I] extends string ? Not<HasKey<ReactEntry, Names[I]>> : never
+}
+type PresentOnKernel<Names extends readonly string[]> = {
+    [I in keyof Names]: Names[I] extends string ? Equals<HasKey<ContainerEntry, Names[I]>, true> : never
+}
 
-// The tokenizer used to be the second carve-out — this package shipped its own, identical in shape but
-// with `@remodulo/react` baked into the `Symbol.for` key. It is DELETED. There is one tokenizer now, the
-// kernel's, and `Token` here is that object by reference; a token minted through either entry point is the
-// same symbol, which is what the carve-out was quietly preventing.
-//
-// Stated because it bounds what these four pins prove: the two tokenizers were type-IDENTICAL even when
-// they were two objects, so `Equals` would have passed then too. What makes it true now is that there is
-// nothing left to be identical TO — the local module is gone and these names have one source. The minted
-// namespace is a runtime fact, and the kernel's own tokenizer suite is where it is pinned.
-type _TokenIsTheKernels = Expect<Equals<ReactEntry["Token"], ContainerEntry["Token"]>>
-type _MakeTokenizerIsTheKernels = Expect<Equals<ReactEntry["makeTokenizer"], ContainerEntry["makeTokenizer"]>>
-type _TokenizerTypeIsTheKernels = Expect<
-    Equals<Tokenizer, import("@remodulo/container/types").Tokenizer>
->
-type _TokenOptionsIsTheKernels = Expect<
-    Equals<TokenOptions, import("@remodulo/container/types").TokenOptions>
->
+type _KernelNamesAreNotReExported = Expect<Equals<AbsentFromReact<KernelOwned>[number], true>>
+type _KernelNamesAreOnTheKernel = Expect<Equals<PresentOnKernel<KernelOwned>[number], true>>
+
+// The global `Token` is gone from BOTH packages — a consumer mints its own namespaced tokenizer — and
+// `TokenOptions` went with the duplicate guard it configured.
+type _NoTokenOnReact = Expect<Not<HasKey<ReactEntry, "Token">>>
+type _NoTokenOnKernel = Expect<Not<HasKey<ContainerEntry, "Token">>>
 
 // The provider grammar is the ONE carve-out left: react's forms carry `lazy`, the kernel's do not. Same
 // names, deliberately different types, which is why `KernelProvider` is the one thing this file still
@@ -1944,16 +1963,6 @@ type _InjectionContextCodeLiteral = Expect<Equals<typeof INJECTION_CONTEXT_ERROR
 // accident. The type surface below gets the same treatment.
 
 const publicValueSurface = [
-    Container,
-    Scope,
-    ResolveMode,
-    ResolveAllMode,
-    RegistrationMode,
-    inject,
-    injectAll,
-    injectContainer,
-    injectOptional,
-    runInInjectionContext,
     App,
     Module,
     AppProvider,
@@ -1969,23 +1978,10 @@ const publicValueSurface = [
     useResolveAll,
     usePropsRef,
     ModuleTraversal,
-    Resolver,
     PropsRef,
     Ref,
     RefMap,
-    Token,
-    makeTokenizer,
-    ContainerEvent,
-    injectResolver,
-    describeToken,
-    CycleError,
-    RegistrationError,
-    ResolutionError,
-    InjectionContextError,
-    CYCLE_ERROR_CODE,
-    REGISTRATION_ERROR_CODE,
-    RESOLUTION_ERROR_CODE,
-    INJECTION_CONTEXT_ERROR_CODE,
+    ModuleStatus,
 ] as const
 // 31 -> 31 across the 0.10.0 kernel rework, which is a coincidence worth stating rather than evidence
 // that nothing moved: SIX decorator exports left (`Inject`, `InjectAll`, `Injectable`, `Optional`,
@@ -1999,37 +1995,26 @@ const publicValueSurface = [
 // through the `./core` entry, and it is now off that too: the module registers it under a token this
 // package does not export, so there is no longer a name to resolve it by from out here. It is still the
 // fourth system provider in the container; what changed is that the key is unspellable.
-// 31 -> 42 when the owner ruled that a peer dependency should never need a second import path. All
-// eleven arrivals are the KERNEL's, re-exported rather than grown: `ContainerEvent`, `injectResolver`,
-// `describeToken`, the four typed errors and their four codes. Nothing left, and nothing react owns
-// changed — the two names the kernel also publishes, `Token` and `makeTokenizer`, are still this
-// package's own (see the boundary section).
+// 31 -> 42 when the owner ruled that a peer dependency should never need a second import path.
 // Still 42 after `useContainer` left and `useResolver` arrived: a one-for-one swap of the module's write
 // door for its read one, so the LIST is again what carries the meaning and not the number.
-type _PublicValueSurfaceSize = Expect<Equals<typeof publicValueSurface.length, 42>>
+// 42 -> 19 when that ruling was REVERSED: a peer dependency is already a direct dependency of the app, so
+// re-exporting it bought a second spelling for every kernel name and nothing else. Everything whose
+// implementation lives in `@remodulo/container` left in one go — the container and the mode enums, the
+// five ambient readers plus `runInInjectionContext`, `Resolver`, the tokenizer, `describeToken`,
+// `ContainerEvent`, and the four errors with their four codes. What remains is what this package OWNS,
+// which is the point of the list: react's modules, its hooks, its primitives and its lifecycle alphabet.
+type _PublicValueSurfaceSize = Expect<Equals<typeof publicValueSurface.length, 19>>
 
 // The `./types` subpath must carry the entire public type surface. Every exported name is referenced
 // once.
 type PublicTypeSurface = [
-    AbstractConstructor<Logger>,
-    AliasEntrySnapshot,
-    BindingEntrySnapshot<AppConfig>,
     ClassProvider<UserStore>,
-    Constructor<ApiClient>,
-    EntryMetadata,
-    EntrySnapshot,
     ExistingProvider<Logger>,
     FactoryProvider<Logger>,
     Feature,
-    Frame,
-    InjectionToken<AppConfig>,
     Provider,
     ProviderInput,
-    RequestCache,
-    ResolveMode,
-    ResolveAllMode,
-    RegistrationMode,
-    Scope,
     SelfClassProvider<FocusManager>,
     TokenClassProvider<UserStore>,
     ValueProvider<AppConfig>,
@@ -2045,22 +2030,9 @@ type PublicTypeSurface = [
     PropsBridgeOptions<UserProps, UserVM>,
     UsePropsRefOptions<UserProps, UserVM>,
     UsePropsRefResult<UserVM>,
-    TokenOptions,
-    Tokenizer,
-    AfterMaterializeEvent,
-    AfterResolutionEvent,
-    BeforeMaterializeEvent,
-    BeforeResolutionEvent,
-    ClassKey<UserStore>,
-    ContainerEventListener,
-    ContainerEventPayload,
-    // Spelled through the subpath on purpose: these five also arrive from the ROOT as values, so naming
-    // them bare would pin the import block above rather than `./types`.
-    import("@remodulo/react/types").ContainerEvent,
-    import("@remodulo/react/types").CycleError,
-    import("@remodulo/react/types").RegistrationError,
-    import("@remodulo/react/types").ResolutionError,
-    import("@remodulo/react/types").InjectionContextError,
+    // Spelled through the subpath on purpose: it also arrives from the ROOT as a value, so naming it bare
+    // would pin the import block above rather than `./types`.
+    import("@remodulo/react/types").ModuleStatus,
 ]
 // 32 -> 39 -> 36 across 0.10.0. The seven arrivals were kernel types the React package re-exports rather
 // than anything React grew: the registration/observation vocabulary a consumer meets the moment it reads a
@@ -2074,21 +2046,24 @@ type PublicTypeSurface = [
 // never nameable from `.` or `./types`, so its departure cannot show up in this count. The `./core`
 // subpath is not pinned by this file at all — see the Module section above, where the deletion IS
 // caught, through the member that used to return it.
-// 36 -> 48 alongside the value surface, and for the same ruling: the kernel's observation vocabulary
-// (`ContainerEvent` and its four payloads, `ContainerEventListener`, `ContainerEventPayload`), the four
-// error types, and `ClassKey` — the arm of `InjectionToken` a consumer meets the moment it holds an
-// abstract class as a token. The provider forms are still react's own and still absent from this list as
-// kernel types; they appear once each, above, in react's spelling.
-type _PublicTypeSurfaceSize = Expect<Equals<PublicTypeSurface["length"], 48>>
+// 36 -> 48 alongside the value surface, and for the same ruling.
+// 48 -> 22 when that ruling was reversed: every kernel type went back behind
+// `@remodulo/container/types`, where this file now imports it from. What is left is react's own — the
+// seven provider forms it derives with `lazy`, the module and lifecycle vocabulary, the props bridge, the
+// React-surface prop types, and `ModuleStatus`.
+type _PublicTypeSurfaceSize = Expect<Equals<PublicTypeSurface["length"], 22>>
 
-// The four `Enum` names in that list are the only ones a consumer imports from the ROOT as values, so the
-// claim that `./types` also carries them cannot ride on the import block above. Pinned directly instead.
-type _ResolveModeOnTypesSubpath = Expect<Equals<import("@remodulo/react/types").ResolveMode, ResolveMode>>
-type _ResolveAllModeOnTypesSubpath = Expect<
-    Equals<import("@remodulo/react/types").ResolveAllMode, ResolveAllMode>
+// The mode enums are the kernel's, on the kernel's subpath — react's `./types` no longer carries them,
+// which is the reversal stated as three absences and three presences.
+type _NoResolveModeOnReactTypes = Expect<Not<HasKey<ReactTypesEntry, "ResolveMode">>>
+type _NoResolveAllModeOnReactTypes = Expect<Not<HasKey<ReactTypesEntry, "ResolveAllMode">>>
+type _NoRegistrationModeOnReactTypes = Expect<Not<HasKey<ReactTypesEntry, "RegistrationMode">>>
+type _ResolveModeOnKernelTypes = Expect<Equals<import("@remodulo/container/types").ResolveMode, ResolveMode>>
+type _ResolveAllModeOnKernelTypes = Expect<
+    Equals<import("@remodulo/container/types").ResolveAllMode, ResolveAllMode>
 >
-type _RegistrationModeOnTypesSubpath = Expect<
-    Equals<import("@remodulo/react/types").RegistrationMode, RegistrationMode>
+type _RegistrationModeOnKernelTypes = Expect<
+    Equals<import("@remodulo/container/types").RegistrationMode, RegistrationMode>
 >
 
 // Keep the module-scope constants that exist only to be typechecked from being flagged as dead by a

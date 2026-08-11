@@ -1,6 +1,6 @@
 {
     "name": "@remodulo/mobx",
-    "version": "0.2.1",
+    "version": "0.2.2",
     "description": "MobX companion for @remodulo/react",
     "license": "MIT",
     "author": "Egor Arkhipov (Lumine Labs)",
@@ -61,6 +61,7 @@
         "react": "^18.0.0 || ^19.0.0"
     },
     "devDependencies": {
+        "@remodulo/container": "workspace:*",
         "@remodulo/react": "workspace:*",
         "@testing-library/jest-dom": "^6.9.1",
         "@testing-library/react": "^16.3.2",

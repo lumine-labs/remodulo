@@ -50,4 +50,4 @@ export type { InjectionContextError } from "./injector.errors.js"
 // Tokens
 // ========================================
 
-export type { TokenOptions, Tokenizer } from "./tokenizer.js"
+export type { Tokenizer } from "./tokenizer.js"

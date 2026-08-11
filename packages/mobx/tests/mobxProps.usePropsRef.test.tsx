@@ -1,6 +1,7 @@
 import { act, render, screen } from "@testing-library/react"
 import { autorun } from "mobx"
-import { App, AppProvider, createModuleComponent, inject, PropsRef, useResolve } from "@remodulo/react"
+import { inject } from "@remodulo/container"
+import { App, AppProvider, createModuleComponent, PropsRef, useResolve } from "@remodulo/react"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import { useState } from "react"
 

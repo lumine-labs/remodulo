@@ -47,6 +47,9 @@ importers:
 
   packages/mobx:
     devDependencies:
+      '@remodulo/container':
+        specifier: workspace:*
+        version: link:../container
       '@remodulo/react':
         specifier: workspace:*
         version: link:../react

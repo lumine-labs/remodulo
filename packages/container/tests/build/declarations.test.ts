@@ -394,6 +394,28 @@ describe("emitted declarations", () => {
         expect(types).toContain('export type { InjectionContextError } from "./injector.errors.js"')
     })
 
+    it("publishes a tokenizer factory whose namespace is required, and no global `Token`", () => {
+        // The namespace carries the whole collision story, so it is not optional and there is no default
+        // for it to fall back to — a consumer mints one tokenizer per library. The options bag went with
+        // the duplicate guard, so minting takes a name and nothing else.
+        expect(declaration("tokenizer.d.ts")).toContain(
+            "export declare function makeTokenizer(namespace: string): Tokenizer;"
+        )
+        expect(declaration("tokenizer.d.ts")).toContain(
+            "export type Tokenizer = <T = unknown>(name: string) => InjectionToken<T>;"
+        )
+        expect(declaration("index.d.ts")).toContain('export { makeTokenizer } from "./tokenizer.js"')
+
+        // The global tokenizer and its options type are gone from both entry points.
+        for (const file of ["tokenizer.d.ts", "index.d.ts", "types.d.ts"]) {
+            expect(declaration(file)).not.toContain("TokenOptions")
+            expect(declaration(file)).not.toContain("allowDuplicate")
+            expect(declaration(file)).not.toContain("DEFAULT_TOKEN_NAMESPACE")
+        }
+        expect(declaration("index.d.ts")).not.toMatch(/\bToken\b/)
+        expect(declaration("types.d.ts")).not.toMatch(/\bToken\b/)
+    })
+
     it("publishes describeToken as a value, with the signature the errors use it through", () => {
         // It renders every token an error message names; the layer above needs the same rendering rather
         // than a copy of it, so it is a published function and its one-argument shape is the surface.

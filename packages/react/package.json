@@ -1,6 +1,6 @@
 {
     "name": "@remodulo/react",
-    "version": "0.11.0",
+    "version": "0.12.0",
     "description": "Non-reactive dependency injection library for React: modules as ownership boundaries, plain classes, no decorators.",
     "license": "MIT",
     "author": "Egor Arkhipov (Lumine Labs)",

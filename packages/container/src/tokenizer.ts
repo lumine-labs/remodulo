@@ -1,39 +1,27 @@
 import type { InjectionToken } from "./container.types.js"
 
-const DEFAULT_TOKEN_NAMESPACE = "@remodulo/container"
+// Tokenizer
+// ========================================
 
-export type TokenOptions = {
-    allowDuplicate?: boolean
-}
+export type Tokenizer = <T = unknown>(name: string) => InjectionToken<T>
 
-export type Tokenizer = <T = unknown>(name: string, options?: TokenOptions) => InjectionToken<T>
+/**
+ * A namespaced token factory. Every name is interned in the global symbol registry under
+ * `<namespace>:<name>`, so the same name through the same namespace is the same token — twice in one file,
+ * or once in each of two copies of a package sharing a process.
+ */
+export function makeTokenizer(namespace: string): Tokenizer {
+    const trimmedNamespace = namespace.trim()
+    if (!trimmedNamespace) {
+        throw new Error("makeTokenizer: `namespace` must be a non-empty string.")
+    }
 
-function buildTokenKey(name: string, namespace: string): string {
-    return `${namespace}:${name}`
-}
-
-export function makeTokenizer(namespace = DEFAULT_TOKEN_NAMESPACE): Tokenizer {
-    const defaultNamespace = namespace.trim() || DEFAULT_TOKEN_NAMESPACE
-    const declaredTokenKeys = new Set<string>()
-
-    return function Token<T = unknown>(name: string, options?: TokenOptions): InjectionToken<T> {
+    return function Token<T = unknown>(name: string): InjectionToken<T> {
         const trimmedName = name.trim()
         if (!trimmedName) {
             throw new Error("Token: `name` must be a non-empty string.")
         }
 
-        const key = buildTokenKey(trimmedName, defaultNamespace)
-        const allowDuplicate = options?.allowDuplicate ?? false
-
-        if (!allowDuplicate && declaredTokenKeys.has(key)) {
-            throw new Error(
-                `Token: token "${key}" is already declared. Use a unique name/namespace or set { allowDuplicate: true }.`
-            )
-        }
-
-        declaredTokenKeys.add(key)
-        return Symbol.for(key)
+        return Symbol.for(`${trimmedNamespace}:${trimmedName}`)
     }
 }
-
-export const Token = makeTokenizer(DEFAULT_TOKEN_NAMESPACE)

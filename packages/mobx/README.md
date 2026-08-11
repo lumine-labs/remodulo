@@ -17,21 +17,23 @@ reactivity-agnostic; this is where the two libraries meet.
 npm install @remodulo/mobx
 ```
 
-Peers: `@remodulo/react` `^0.10.0`, `mobx` `^6.0.0`, `react` `^18.0.0 || ^19.0.0`. No `reflect-metadata`, no
+Peers: `@remodulo/react` `^0.12.0`, `@remodulo/container` `^0.3.0`, `mobx` `^6.0.0`, `react` `^18.0.0 || ^19.0.0`. No `reflect-metadata`, no
 decorators, no compiler flags — dependencies arrive as `inject()` fields, exactly as in the core.
 
 ## Example
 
 ```tsx
+import { inject, makeTokenizer } from "@remodulo/container"
 import { ViewModel, makeInheritedAutoObservable, mobxProps } from "@remodulo/mobx"
-import { PropsRef, Token, createModuleComponent, inject } from "@remodulo/react"
+import { PropsRef, createModuleComponent } from "@remodulo/react"
 import { autorun, runInAction } from "mobx"
 
 type ChartProps = { series: string; window: number }
 
 class ChartPropsRef extends PropsRef<ChartProps> {}
 
-const TApiClient = Token<{ points(series: string, window: number): Promise<number[]> }>("ApiClient")
+const tokens = makeTokenizer("chart")
+const TApiClient = tokens<{ points(series: string, window: number): Promise<number[]> }>("ApiClient")
 
 class ChartStore extends ViewModel {
     points: number[] = []

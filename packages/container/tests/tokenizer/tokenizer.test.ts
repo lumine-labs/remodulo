@@ -1,121 +1,119 @@
 import { describe, expect, it } from "vitest"
 
 import { Container } from "../../src/container.js"
-import { makeTokenizer, Token } from "../../src/tokenizer.js"
+import { makeTokenizer } from "../../src/tokenizer.js"
 
 // Tokens.
 // ========================================
 //
 // A token is a symbol interned in the GLOBAL registry under `<namespace>:<name>`, so two copies of a package
-// in one process still agree about what a token is. The duplicate guard is therefore not about identity — it
-// is a per-tokenizer bookkeeping check that catches the same name being declared twice through the same
-// factory, and nothing wider.
+// in one process still agree about what a token is. That is the whole mechanism, and the API is now honest
+// about it: minting the same name twice hands back the same token rather than throwing, because
+// `Symbol.for` was always going to return the same symbol either way.
+//
+// What keeps two unrelated libraries from colliding is the NAMESPACE, which every tokenizer must name. That
+// is structural — a feature with its own tokenizer cannot collide with anyone else's — where the old
+// duplicate guard was social, and it caught only same-name-through-the-same-factory while breaking under
+// HMR, which re-runs the module and re-declares every token.
 
-describe("Token", () => {
+describe("minting", () => {
     it("returns a symbol interned under `<namespace>:<name>`", () => {
-        const Tokenize = makeTokenizer("tests.tokenizer.interning")
+        const tokens = makeTokenizer("tests.tokenizer.interning")
 
-        const token = Tokenize("service")
+        const token = tokens("service")
 
         expect(typeof token).toBe("symbol")
         expect((token as symbol).description).toBe("tests.tokenizer.interning:service")
         expect(token).toBe(Symbol.for("tests.tokenizer.interning:service"))
     })
 
-    it("uses the @remodulo/container namespace for the default export", () => {
-        const token = Token("tests.tokenizer.default-export")
+    it("carries the value type through to the token", () => {
+        const tokens = makeTokenizer("tests.tokenizer.typed")
+        const GREETING = tokens<string>("greeting")
 
-        expect((token as symbol).description).toBe("@remodulo/container:tests.tokenizer.default-export")
-        expect(token).toBe(Symbol.for("@remodulo/container:tests.tokenizer.default-export"))
-    })
+        const container = new Container()
+        container.register({ provide: GREETING, useValue: "hello" })
 
-    it("defaults `makeTokenizer` to the same namespace", () => {
-        const Tokenize = makeTokenizer()
-
-        expect((Tokenize("tests.tokenizer.implicit-namespace") as symbol).description).toBe(
-            "@remodulo/container:tests.tokenizer.implicit-namespace"
-        )
+        const greeting: string = container.resolve(GREETING)
+        expect(greeting).toBe("hello")
     })
 })
 
-describe("duplicate names", () => {
-    it("throws on a second declaration, naming the full key", () => {
-        const Tokenize = makeTokenizer("tests.tokenizer.duplicates")
-        Tokenize("repeated")
+describe("idempotence", () => {
+    it("hands back the SAME token for the same name, however many times it is minted", () => {
+        // The duplicate guard is gone, and this is what replaces it: re-declaring is not an error, it is
+        // the same declaration. A module re-evaluated by HMR mints the same tokens it minted before.
+        const tokens = makeTokenizer("tests.tokenizer.idempotent")
 
-        expect(() => Tokenize("repeated")).toThrow(
-            'Token: token "tests.tokenizer.duplicates:repeated" is already declared. Use a unique name/namespace or set { allowDuplicate: true }.'
-        )
-    })
-
-    it("permits the duplicate under `allowDuplicate` and hands back the same interned symbol", () => {
-        const Tokenize = makeTokenizer("tests.tokenizer.allow-duplicate")
-
-        const first = Tokenize("shared")
-        const second = Tokenize("shared", { allowDuplicate: true })
+        const first = tokens("repeated")
+        const second = tokens("repeated")
+        const third = tokens("repeated")
 
         expect(second).toBe(first)
-        expect(second).toBe(Symbol.for("tests.tokenizer.allow-duplicate:shared"))
+        expect(third).toBe(first)
+        expect(first).toBe(Symbol.for("tests.tokenizer.idempotent:repeated"))
     })
 
-    it("still records a name declared under `allowDuplicate`, so the next plain call throws", () => {
-        const Tokenize = makeTokenizer("tests.tokenizer.allow-duplicate-records")
+    it("agrees across two tokenizers over the same namespace", () => {
+        // Identity lives in the global registry, not in the factory, so two factories over one namespace
+        // are two doors to the same tokens.
+        const first = makeTokenizer("tests.tokenizer.same-namespace")
+        const second = makeTokenizer("tests.tokenizer.same-namespace")
 
-        Tokenize("recorded", { allowDuplicate: true })
-
-        expect(() => Tokenize("recorded")).toThrow(
-            'Token: token "tests.tokenizer.allow-duplicate-records:recorded" is already declared.'
-        )
+        expect(second("shared")).toBe(first("shared"))
     })
 
-    it("tracks declarations per tokenizer instance, not per namespace", () => {
-        // Two factories over one namespace do NOT see each other: the guard is closure-local bookkeeping,
-        // while identity comes from the global symbol registry. Same name, no throw, same symbol.
-        const first = makeTokenizer("tests.tokenizer.per-instance")
-        const second = makeTokenizer("tests.tokenizer.per-instance")
+    it("keeps the same name apart across DIFFERENT namespaces", () => {
+        // The other half, and the reason the namespace is mandatory: this is what makes an accidental
+        // collision between two libraries impossible rather than merely discouraged.
+        const feature = makeTokenizer("tests.tokenizer.feature-a")
+        const other = makeTokenizer("tests.tokenizer.feature-b")
 
-        const fromFirst = first("collides")
-        const fromSecond = second("collides")
+        const fromFeature = feature("logger")
+        const fromOther = other("logger")
 
-        expect(fromSecond).toBe(fromFirst)
-        expect(() => second("collides")).toThrow(
-            'Token: token "tests.tokenizer.per-instance:collides" is already declared.'
-        )
+        expect(fromFeature).not.toBe(fromOther)
+        expect((fromFeature as symbol).description).toBe("tests.tokenizer.feature-a:logger")
+        expect((fromOther as symbol).description).toBe("tests.tokenizer.feature-b:logger")
+
+        // And they really are two different tokens as far as a container is concerned.
+        const container = new Container()
+        container.register([
+            { provide: fromFeature, useValue: "a" },
+            { provide: fromOther, useValue: "b" },
+        ])
+        expect(container.resolve(fromFeature)).toBe("a")
+        expect(container.resolve(fromOther)).toBe("b")
     })
 })
 
 describe("name and namespace validation", () => {
     it("rejects an empty or whitespace-only name", () => {
-        const Tokenize = makeTokenizer("tests.tokenizer.validation")
+        const tokens = makeTokenizer("tests.tokenizer.validation")
 
-        expect(() => Tokenize("")).toThrow("Token: `name` must be a non-empty string.")
-        expect(() => Tokenize("   \t\n ")).toThrow("Token: `name` must be a non-empty string.")
+        expect(() => tokens("")).toThrow("Token: `name` must be a non-empty string.")
+        expect(() => tokens("   \t\n ")).toThrow("Token: `name` must be a non-empty string.")
     })
 
-    it("trims the name before interning and before the duplicate check", () => {
-        const Tokenize = makeTokenizer("tests.tokenizer.trimming")
-
-        const token = Tokenize("  padded  ")
-
-        expect(token).toBe(Symbol.for("tests.tokenizer.trimming:padded"))
-        expect(() => Tokenize("padded")).toThrow(
-            'Token: token "tests.tokenizer.trimming:padded" is already declared.'
-        )
+    it("rejects an empty or whitespace-only namespace", () => {
+        // There is no default namespace to fall back to any more — the namespace is the whole collision
+        // story, so a tokenizer that names none is refused where it is built rather than where it is used.
+        expect(() => makeTokenizer("")).toThrow("makeTokenizer: `namespace` must be a non-empty string.")
+        expect(() => makeTokenizer("   ")).toThrow("makeTokenizer: `namespace` must be a non-empty string.")
     })
 
-    it("falls back to the default namespace when the namespace is whitespace-only", () => {
-        const Tokenize = makeTokenizer("   ")
+    it("trims both halves before interning", () => {
+        const tokens = makeTokenizer("  tests.tokenizer.trimming  ")
 
-        expect((Tokenize("tests.tokenizer.blank-namespace") as symbol).description).toBe(
-            "@remodulo/container:tests.tokenizer.blank-namespace"
-        )
+        expect(tokens("  padded  ")).toBe(Symbol.for("tests.tokenizer.trimming:padded"))
+        expect(tokens("padded")).toBe(tokens("  padded  "))
     })
 })
 
 describe("end to end", () => {
     it("registers and resolves through a token from `makeTokenizer`", () => {
-        const Tokenize = makeTokenizer("tests.tokenizer.e2e")
-        const GREETING = Tokenize<string>("greeting")
+        const tokens = makeTokenizer("tests.tokenizer.e2e")
+        const GREETING = tokens<string>("greeting")
 
         const container = new Container()
         container.register({ provide: GREETING, useValue: "hello" })
@@ -125,11 +123,24 @@ describe("end to end", () => {
     })
 
     it("names the token by its full key in container errors", () => {
-        const Tokenize = makeTokenizer("tests.tokenizer.errors")
-        const MISSING = Tokenize("missing")
+        const tokens = makeTokenizer("tests.tokenizer.errors")
+        const MISSING = tokens("missing")
 
         expect(() => new Container().resolve(MISSING)).toThrow(
             "Token tests.tokenizer.errors:missing is not registered in this container or any ancestor."
         )
     })
 })
+
+// The namespace is REQUIRED, and the options bag is gone. Checked by `typecheck:tests`, and again against
+// the published declarations in the consumer fixtures. Never called.
+function tokenizerGrammar(): void {
+    // @ts-expect-error a tokenizer must name its namespace — there is no default to fall back to.
+    makeTokenizer()
+
+    const tokens = makeTokenizer("tests.tokenizer.grammar")
+
+    // @ts-expect-error `allowDuplicate` went with the duplicate guard; minting takes a name and nothing else.
+    tokens("named", { allowDuplicate: true })
+}
+void tokenizerGrammar

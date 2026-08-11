@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 
 import { Container } from "../../src/container.js"
-import { Token } from "../../src/tokenizer.js"
+import { makeTokenizer } from "../../src/tokenizer.js"
 import { describeToken } from "../../src/utils/describeToken.js"
 
 // describeToken, now public.
@@ -28,7 +28,7 @@ describe("describeToken", () => {
     it("renders every token kind the way an error message shows it", () => {
         class Service {}
         const symbolToken = Symbol("PLUGINS")
-        const tokenizerToken = Token("describe-token.probe")
+        const tokenizerToken = makeTokenizer("tests.describe-token")("probe")
         const stringToken = "describe-token.string"
         const namelessSymbol = Symbol()
 
@@ -45,13 +45,7 @@ describe("describeToken", () => {
             describeToken(tokenizerToken),
             describeToken(stringToken),
             describeToken(namelessSymbol),
-        ]).toEqual([
-            "Service",
-            "PLUGINS",
-            "@remodulo/container:describe-token.probe",
-            "describe-token.string",
-            "Symbol()",
-        ])
+        ]).toEqual(["Service", "PLUGINS", "tests.describe-token:probe", "describe-token.string", "Symbol()"])
     })
 
     it("names an anonymous class rather than rendering an empty string", () => {

@@ -1,6 +1,6 @@
 {
     "name": "@remodulo/container",
-    "version": "0.2.0",
+    "version": "0.3.0",
     "description": "The remodulo dependency injection container: zero runtime dependencies, no decorators, injection through an ambient construction frame.",
     "license": "MIT",
     "author": "Egor Arkhipov (Lumine Labs)",

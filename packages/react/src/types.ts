@@ -1,43 +1,6 @@
-// Container
-// ========================================
-
-// The kernel's whole type surface, re-exported: a consumer that only wants types never reaches for
-// `@remodulo/container/types`. The provider forms are the one carve-out — this package derives its own
-// (`Lazy<P>`, see the Providers block below).
-
-export type {
-    AbstractConstructor,
-    AfterMaterializeEvent,
-    AfterResolutionEvent,
-    AliasEntrySnapshot,
-    BeforeMaterializeEvent,
-    BeforeResolutionEvent,
-    BindingEntrySnapshot,
-    ClassKey,
-    Constructor,
-    ContainerEvent,
-    ContainerEventListener,
-    ContainerEventPayload,
-    EntryMetadata,
-    EntrySnapshot,
-    Frame,
-    InjectionToken,
-    RegistrationMode,
-    RequestCache,
-    ResolveAllMode,
-    ResolveMode,
-    Scope,
-} from "@remodulo/container/types"
-
-// Errors
-// ========================================
-
-export type {
-    CycleError,
-    InjectionContextError,
-    RegistrationError,
-    ResolutionError,
-} from "@remodulo/container/types"
+// This package's own type surface. The kernel's types — tokens, snapshots, events, errors, the mode
+// enums — are `@remodulo/container/types`, imported from the peer directly. What lives here is what this
+// package owns, starting with the provider forms it derives (`Lazy<P>`).
 
 // Providers
 // ========================================
@@ -90,8 +53,3 @@ export type {
     PropsBridgeOptions,
 } from "./react/createModuleComponent.js"
 export type { UsePropsRefOptions, UsePropsRefResult } from "./react/usePropsRef.js"
-
-// Tokens
-// ========================================
-
-export type { TokenOptions, Tokenizer } from "@remodulo/container/types"

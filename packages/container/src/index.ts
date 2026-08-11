@@ -33,7 +33,7 @@ export { INJECTION_CONTEXT_ERROR_CODE, InjectionContextError } from "./injector.
 // Tokens
 // ========================================
 
-export { Token, makeTokenizer } from "./tokenizer.js"
+export { makeTokenizer } from "./tokenizer.js"
 export { describeToken } from "./utils/describeToken.js"
 
 // Types
