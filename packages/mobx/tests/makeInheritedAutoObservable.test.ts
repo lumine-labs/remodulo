@@ -1,7 +1,8 @@
-import { autorun, isAction, isComputedProp, isObservableProp, runInAction } from "mobx"
+import { $mobx, autorun, isAction, isComputedProp, isObservableProp, makeObservable, runInAction } from "mobx"
 import { describe, expect, it } from "vitest"
 
 import { makeInheritedAutoObservable } from "../src/makeInheritedAutoObservable"
+import { ViewModel } from "../src/ViewModel"
 
 class PlainBase {
     inherited = "base"
@@ -544,5 +545,175 @@ describe("makeInheritedAutoObservable: cache scoping across inheritance levels",
             derivedGetter: true,
             detached: "derived",
         })
+    })
+})
+
+// What the key walk collects, and what it skips
+// ========================================
+//
+// The walk is `Reflect.ownKeys` over the instance and every prototype below `Object.prototype`, and it
+// drops three kinds of key: MobX's own administration symbol, `constructor`, and anything the target
+// holds as a NON-CONFIGURABLE own property. The last of those is what makes `ViewModel` work at all —
+// its four sealed hooks are non-configurable own properties, and MobX deletes a property before
+// redefining it, so annotating one throws.
+//
+// These cells read the collected map directly off the prototype cache as well as asserting behaviour:
+// the map IS the walk's product, so a key that should never have been collected is visible here even
+// when MobX happens to tolerate it.
+
+const ANNOTATIONS_CACHE = Symbol.for("@remodulo/mobx:annotations")
+
+function collectedFor(proto: object): Record<PropertyKey, unknown> {
+    const map = Object.getOwnPropertyDescriptor(proto, ANNOTATIONS_CACHE)?.value as
+        | Record<PropertyKey, unknown>
+        | undefined
+
+    if (!map) throw new Error("no cached annotation map on this prototype")
+    return map
+}
+
+describe("makeInheritedAutoObservable: the key walk", () => {
+    const LABEL = Symbol("label")
+
+    class SymBase {
+        baseField = "base"
+        baseMethod(): string {
+            return this.baseField
+        }
+    }
+
+    class Walked extends SymBase {
+        plain = 1
+        declaredOff = 2;
+        [LABEL] = "sym"
+
+        constructor() {
+            super()
+            Object.defineProperty(this, "frozen", { value: "sealed", configurable: false, enumerable: true })
+            makeInheritedAutoObservable(this, { declaredOff: false })
+        }
+
+        method(): void {}
+
+        get derived(): number {
+            return this.plain * 2
+        }
+    }
+
+    it("collects every level's own keys and nothing else", () => {
+        new Walked()
+        const collected = collectedFor(Walked.prototype)
+
+        expect(new Set(Reflect.ownKeys(collected).filter((key) => typeof key === "string"))).toEqual(
+            new Set(["baseField", "plain", "declaredOff", "method", "derived", "baseMethod"])
+        )
+    })
+
+    it("skips $mobx and constructor", () => {
+        new Walked()
+        const keys = Reflect.ownKeys(collectedFor(Walked.prototype))
+
+        // `constructor` is on every prototype the walk visits; annotating it would make the class itself
+        // an observable field. `$mobx` is MobX's own administration key and is never ours to annotate.
+        expect(keys).not.toContain("constructor")
+        expect(keys).not.toContain($mobx)
+    })
+
+    it("skips a non-configurable own property of the target", () => {
+        const walked = new Walked()
+
+        expect(Reflect.ownKeys(collectedFor(Walked.prototype))).not.toContain("frozen")
+        expect(isObservableProp(walked, "frozen")).toBe(false)
+        // The sibling declared right beside it is still annotated, so this is a skip and not a bail-out.
+        expect(isObservableProp(walked, "plain")).toBe(true)
+    })
+
+    it("would throw without that skip — MobX deletes before it redefines", () => {
+        class Frozen {
+            visible = 1
+            constructor() {
+                Object.defineProperty(this, "frozen", { value: 9, configurable: false, enumerable: true })
+            }
+        }
+
+        // The raw call is what `makeInheritedAutoObservable` would make if the walk collected `frozen`.
+        expect(() => makeObservable(new Frozen(), { visible: true, frozen: true } as never)).toThrowError(TypeError)
+        // And the same shape through our walk is fine.
+        expect(() => new Walked()).not.toThrow()
+    })
+
+    it("includes symbol-keyed fields, which Object.keys would have missed", () => {
+        const walked = new Walked()
+
+        expect(collectedFor(Walked.prototype)[LABEL]).toBe(true)
+        expect(isObservableProp(walked, LABEL as unknown as string)).toBe(true)
+        expect(Object.keys(walked)).not.toContain(LABEL)
+    })
+
+    it("lets a declared override win, and defaults every key it does not name to true", () => {
+        const walked = new Walked()
+        const collected = collectedFor(Walked.prototype)
+
+        expect(collected.declaredOff).toBe(false)
+        expect(collected.plain).toBe(true)
+        expect(isObservableProp(walked, "declaredOff")).toBe(false)
+        expect(isObservableProp(walked, "plain")).toBe(true)
+    })
+
+    it("defaults everything to true when no overrides are given at all", () => {
+        class NoOverrides extends SymBase {
+            n = 1
+            constructor() {
+                super()
+                makeInheritedAutoObservable(this)
+            }
+            m(): void {}
+        }
+
+        new NoOverrides()
+        const collected = collectedFor(NoOverrides.prototype)
+
+        expect(Object.values(collected).every((value) => value === true)).toBe(true)
+    })
+})
+
+// The ViewModel case, which is why the skip exists
+// ========================================
+
+describe("makeInheritedAutoObservable: sealed ViewModel hooks", () => {
+    class CounterVM extends ViewModel {
+        count = 1
+
+        constructor() {
+            super()
+            makeInheritedAutoObservable(this, {}, { autoBind: true })
+        }
+
+        inc(): void {
+            this.count++
+        }
+    }
+
+    it("annotates the subclass while skipping all four sealed hooks", () => {
+        const vm = new CounterVM()
+        const keys = Reflect.ownKeys(collectedFor(CounterVM.prototype))
+
+        for (const hook of ["onModuleInit", "onModuleMount", "onModuleUnmount", "onModuleDestroy"] as const) {
+            expect(keys).not.toContain(hook)
+            expect(isObservableProp(vm, hook)).toBe(false)
+        }
+
+        expect(isObservableProp(vm, "count")).toBe(true)
+        expect(isAction(vm.inc)).toBe(true)
+    })
+
+    it("still annotates the base's own protected helpers, which are not sealed", () => {
+        new CounterVM()
+        const keys = Reflect.ownKeys(collectedFor(CounterVM.prototype))
+
+        // `signal` and `track` are ordinary configurable prototype methods, so the walk takes them and
+        // MobX makes them actions. Only the four lifecycle entry points are held back.
+        expect(keys).toContain("signal")
+        expect(keys).toContain("track")
     })
 })

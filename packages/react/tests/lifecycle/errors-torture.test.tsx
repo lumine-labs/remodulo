@@ -2,10 +2,12 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import { render } from "@testing-library/react"
 import { Component, type ReactNode } from "react"
 
-import { App, Module } from "../../src/core/module/module.js"
-import { ModuleProvider } from "../../src/react/providers/ModuleProvider.js"
-import { makeApp, makeChild, phase, tracked } from "../setup/helpers.js"
+import { App, Module } from "../../src/core/module.js"
+import { ModuleStatus } from "../../src/core/module-lifecycle.types.js"
+import { ModuleProvider } from "../../src/react/ModuleProvider.js"
+import { makeApp, makeChild, phase, refuses, tracked } from "../setup/helpers.js"
 import { Root } from "../setup/react.js"
+import { assertTreeInvariant } from "../setup/invariants.js"
 
 // The error matrix.
 // ========================================
@@ -21,7 +23,8 @@ import { Root } from "../setup/react.js"
 // Continuation semantics as measured, per phase (remaining PROVIDER hooks in the failing module):
 //
 //   init     — abort. The throw leaves the phase and the module never reaches `initialized`.
-//   mount    — abort, detach, reset `#committed`, rethrow the ORIGINAL error. Hooks that already ran keep
+//   mount    — abort, detach, roll the initiator back to a mountable state, rethrow the ORIGINAL error.
+//              Hooks that already ran keep
 //              their side effects: the mount phase is one effect setup, and React leaks a throwing setup's
 //              work too (subscribe, then throw — the subscription stays). Undoing that is the developer's
 //              job. The one thing the library owes is severing the pre-phase attachment, so no dead module
@@ -47,11 +50,15 @@ describe("init errors", () => {
 
         expect(phase(log, "init")).toEqual(["A:init"])
         expect([first.counts.init, last.counts.init]).toEqual([1, 0])
-        expect(app.initialized).toBe(false)
-        expect(app.mounted).toBe(false)
+        expect(app.status).toBeOneOf([ModuleStatus.Created, ModuleStatus.Failed])
+        expect(app.status).not.toBe(ModuleStatus.Mounted)
     })
 
-    it("leaves a module that failed init inert and childless, but still destroyable", async () => {
+    // The reassurance that a failed init does not cost anything, withdrawn by the throwing-gate round and
+    // reinstated by the one after it. Collection runs before the phase does, so every instance the module
+    // built is a participant — and `failed` is a state destroy() serves, so the ones that inited are drained.
+    // What a failed init leaves inert is the three FORWARD signals; the teardown one still works.
+    it("leaves a module that failed init inert to every forward signal, childless, and still destroyable", async () => {
         const log: string[] = []
         const app = new App({
             providers: [tracked(log, "A"), tracked(log, "B", { throwOn: "init" }), tracked(log, "C")],
@@ -59,19 +66,28 @@ describe("init errors", () => {
         expect(() => app.init()).toThrow("B init")
         log.length = 0
 
-        // Every later phase gates on `initialized`, so the signals are inert...
-        app.mount()
-        app.unmount()
+        // Every later phase refuses `failed` by name rather than absorbing the signal.
+        expect(() => app.mount()).toThrow(refuses("mount", "failed"))
+        expect(() => app.unmount()).toThrow(refuses("unmount", "failed"))
         expect(log).toEqual([])
-        expect(app.mounted).toBe(false)
+        expect(app.status).not.toBe(ModuleStatus.Mounted)
 
-        // ...and a child cannot be built off it at all — the un-armed-lifecycle guard from the spec.
-        expect(() => new Module(app, {})).toThrow(/un-initialized parent/)
+        // CLOSED, and the question this cell carried for three rounds goes with it. The guard used to read
+        // the two PRE-INIT states only, so a `failed` parent let a child through and the mount gate caught
+        // it one phase later; then the ancestor walk caught it at `init()` instead. Now it is refused at
+        // `new`, which is where the mistake actually is — there was never a use for the object it returned.
+        expect(() => new Module(app, {})).toThrow(
+            'Cannot create a child module under a failed parent — that branch is spent, so the child could never be armed. Build it under a live parent, or rebuild the branch first.'
+        )
+        expect(app.children.size).toBe(0)
+        assertTreeInvariant(app)
 
-        // ...but destroy is NOT gated on init: collection ran before the phase did, so every instance the
-        // module built still gets its destroy. Characterisation, and the reason a failed init does not leak.
+        // destroy() is the exception. A, B and C were all constructed by the eager pass before the phase
+        // threw; A inited cleanly and B threw from inside its own onModuleInit, so both are drained. C was
+        // never reached by the loop, so it stays `registered` and the drain steps over it.
         await app.destroy()
-        expect(log).toEqual(["C:destroy", "B:destroy", "A:destroy"])
+        expect(log).toEqual(["B:destroy", "A:destroy"])
+        expect(app.status).toBe(ModuleStatus.Destroyed)
     })
 })
 
@@ -87,9 +103,11 @@ describe("mount errors", () => {
 
         expect(() => module.mount()).toThrow("B mount")
 
-        expect(log).toEqual(["A:mount"])
+        // The failure rolls the module back through a full unmount walk, so whatever mounted before the
+        // throw is retired rather than left hanging: A gets the unmount its mount earned.
+        expect(log).toEqual(["A:mount", "A:unmount"])
         expect(last.counts.mount).toBe(0)
-        expect(module.mounted).toBe(false)
+        expect(module.status).not.toBe(ModuleStatus.Mounted)
     })
 
     it("detaches and rethrows the original error, leaking what already mounted", async () => {
@@ -116,16 +134,15 @@ describe("mount errors", () => {
         // registry would be a permanently reachable corpse. This is the one thing the library owes here.
         expect(app.children.has(module)).toBe(false)
         expect(app.children.size).toBe(0)
-        expect(module.mounted).toBe(false)
+        expect(module.status).not.toBe(ModuleStatus.Mounted)
 
-        // A mounted and never gets its unmount. Same class of leak as a `useEffect` setup that subscribes
-        // and then throws — the subscription stays, and undoing it is the developer's job, not React's.
-        // `#committed` is rolled back with the detach, so a fresh mount() would re-attach; that is
-        // undefended rather than blessed.
-        expect(first.counts).toEqual({ init: 1, mount: 1, unmount: 0, destroy: 0 })
+        // A mounted, and the rollback unmounts it — the leak the old contract documented here is closed:
+        // the module hands back every hook it fired before the throw. The node itself lands in `failed`,
+        // which mount() does not accept, so there is no re-running of a half-run phase either.
+        expect(first.counts).toEqual({ init: 1, mount: 1, unmount: 1, destroy: 0 })
 
-        // The imperative escape hatch: `#destroyed` is deliberately not set, so a caller still holding the
-        // module can run its destroy hooks.
+        // The imperative escape hatch: the rollback marks the module `failed` without claiming it, and
+        // destroy() takes `failed`, so the caller still holding the module can reclaim what it built.
         await module.destroy()
         expect(first.counts.destroy).toBe(1)
     })
@@ -150,13 +167,16 @@ describe("mount errors", () => {
         // whole island from the App in one cut. No zombie is reachable from the live registry.
         expect(app.children.size).toBe(0)
 
-        // Neither the parent nor the healthy child gets an unmount out of the failure itself: React parity.
-        expect(parentService.counts).toEqual({ init: 1, mount: 1, unmount: 0, destroy: 0 })
-        expect(healthy.counts).toEqual({ init: 1, mount: 1, unmount: 0, destroy: 0 })
+        // The rollback is a full reverse walk over the severed subtree, so the parent AND the healthy child
+        // are unmounted by the failure itself. No island is left mounted under a node that is not.
+        expect(parentService.counts).toEqual({ init: 1, mount: 1, unmount: 1, destroy: 0 })
+        expect(healthy.counts).toEqual({ init: 1, mount: 1, unmount: 1, destroy: 0 })
 
-        // But effects run child-first, so a healthy child module already registered its own ModuleProvider
-        // cleanup — that still fires and completes it properly. Simulate the pair of signals it would send.
-        first.unmount()
+        // The healthy child module still has its own ModuleProvider cleanup coming. The rollback already
+        // retired it, so unmount() is refused — which is exactly why `useModuleLifecycle` checks
+        // `module.status === mounted` before it sends one. destroy() drains it either way: every island member is
+        // reclaimable on its own, and so is the failed root above them.
+        expect(() => first.unmount()).toThrow(refuses("unmount", "unmounted"))
         await first.destroy()
 
         expect(healthy.counts).toEqual({ init: 1, mount: 1, unmount: 1, destroy: 1 })
@@ -186,8 +206,8 @@ describe("unmount errors", () => {
         expect(first.counts.unmount).toBe(1)
         expect(caught).toBeInstanceOf(AggregateError)
         expect((caught as AggregateError).errors.map((error) => (error as Error).message)).toEqual(["B unmount"])
-        // `#mounted = false` runs in a finally, so the module does not end up claiming to be mounted.
-        expect(module.mounted).toBe(false)
+        // The flip to `unmounted` runs in a finally, so the module does not end up claiming to be mounted.
+        expect(module.status).not.toBe(ModuleStatus.Mounted)
     })
 
     it("still unmounts the children before the parent's own hooks run", () => {
@@ -232,7 +252,7 @@ describe("unmount errors", () => {
         expect(parentService.counts.unmount).toBe(1)
         expect(caught).toBeInstanceOf(AggregateError)
         expect((caught as AggregateError).errors.map((error) => (error as Error).message)).toEqual(["C1 unmount"])
-        expect(parent.mounted).toBe(false)
+        expect(parent.status).not.toBe(ModuleStatus.Mounted)
     })
 })
 

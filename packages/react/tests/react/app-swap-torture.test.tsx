@@ -2,12 +2,14 @@ import { act, render } from "@testing-library/react"
 import { describe, expect, it, vi } from "vitest"
 import { useState, type ReactNode } from "react"
 
-import { App } from "../../src/core/module/module.js"
-import { AppProvider } from "../../src/react/providers/AppProvider.js"
-import { ModuleProvider } from "../../src/react/providers/ModuleProvider.js"
-import { useResolveOptional } from "../../src/react/hooks/useResolve.js"
+import { App } from "../../src/core/module.js"
+import { ModuleStatus } from "../../src/core/module-lifecycle.types.js"
+import { AppProvider } from "../../src/react/AppProvider.js"
+import { ModuleProvider } from "../../src/react/ModuleProvider.js"
+import { useResolveOptional } from "../../src/react/useResolve.js"
 import type { Provider } from "../../src/types.js"
 import { flush, type HookCounts } from "../setup/helpers.js"
+import { assertTreeInvariant } from "../setup/invariants.js"
 
 // Replacing the App under a live tree
 // ========================================
@@ -113,7 +115,7 @@ describe("passing a different App to a live <AppProvider>", () => {
         restore()
     })
 
-    it("throws before the incoming App is touched, and React tears the captured one down", () => {
+    it("throws before the incoming App is touched, and React tears the captured one down", async () => {
         const first = generational([], "A")
         const second = generational([], "B")
 
@@ -136,14 +138,17 @@ describe("passing a different App to a live <AppProvider>", () => {
 
         // The guard runs before anything reads the incoming App, so `b` is untouched — never inited, no
         // instance ever built from it.
-        expect(b.initialized).toBe(false)
+        expect(b.status).toBeOneOf([ModuleStatus.Created, ModuleStatus.Failed])
         expect(counts(second)).toEqual([])
 
         // MEASURED: the throw is a render error, so React unwinds the tree and runs the effect cleanup —
-        // which is now a full teardown. The captured app goes down with the tree rather than being stranded.
+        // which unmounts and SCHEDULES the destroy. Nothing re-runs the setup, so nothing takes it back:
+        // one macrotask later the captured app goes down with the tree rather than being stranded.
+        await flush()
         expect(counts(first)).toEqual([BURIED])
-        expect(a.initialized).toBe(true)
-        expect(a.claimed).toBe(true)
+        expect(a.status).toBeOneOf([ModuleStatus.Destroying, ModuleStatus.Destroyed])
+        assertTreeInvariant(a)
+        assertTreeInvariant(b)
     })
 
     it("re-renders with the SAME instance freely", () => {
@@ -164,7 +169,7 @@ describe("passing a different App to a live <AppProvider>", () => {
 
         expect(getByTestId("n").textContent).toBe("3")
         expect(counts(first)).toEqual([LIVE])
-        expect(a.mounted).toBe(true)
+        expect(a.status).toBe(ModuleStatus.Mounted)
     })
 })
 
@@ -194,8 +199,8 @@ describe("<AppProvider app={() => new App(...)}>", () => {
 
         expect(built).toBe(1)
         expect(apps.length).toBe(1)
-        expect(apps[0]!.initialized).toBe(true)
-        expect(apps[0]!.mounted).toBe(true)
+        expect(apps[0]!.status).not.toBeOneOf([ModuleStatus.Created, ModuleStatus.Failed])
+        expect(apps[0]!.status).toBe(ModuleStatus.Mounted)
         expect(counts(tracker)).toEqual([LIVE])
         expect(log).toEqual(["A#1:ctor", "A#1:init", "A#1:mount"])
 
@@ -205,7 +210,7 @@ describe("<AppProvider app={() => new App(...)}>", () => {
         expect(built).toBe(1)
         expect(counts(tracker)).toEqual([BURIED])
         expect(log).toEqual(["A#1:ctor", "A#1:init", "A#1:mount", "A#1:unmount", "A#1:destroy"])
-        expect(apps[0]!.claimed).toBe(true)
+        expect(apps[0]!.status).toBeOneOf([ModuleStatus.Destroying, ModuleStatus.Destroyed])
     })
 
     it("does not throw when the closure identity changes every render", () => {
@@ -234,7 +239,7 @@ describe("<AppProvider app={() => new App(...)}>", () => {
         expect(counts(tracker)).toEqual([LIVE])
     })
 
-    it("throws when a later render passes an instance instead of the factory", () => {
+    it("throws when a later render passes an instance instead of the factory", async () => {
         const factoryTracker = generational([], "F")
         const otherTracker = generational([], "O")
         const other = new App({ id: "other", providers: [otherTracker.provider] })
@@ -257,7 +262,9 @@ describe("<AppProvider app={() => new App(...)}>", () => {
 
         // The exemption is for FACTORY props only: once an instance shows up it is compared like any other,
         // and it does not match what the factory built.
-        expect(other.initialized).toBe(false)
+        expect(other.status).toBeOneOf([ModuleStatus.Created, ModuleStatus.Failed])
+
+        await flush()
         expect(counts(factoryTracker)).toEqual([BURIED])
     })
 })
@@ -321,8 +328,8 @@ describe("an <AppProvider> nested inside another app's tree", () => {
         expect(log).toEqual(["Inner#1:unmount", "Inner#1:destroy"])
         expect(counts(inner)).toEqual([BURIED])
         expect(counts(outer)).toEqual([LIVE])
-        expect(a.mounted).toBe(true)
-        expect(b.mounted).toBe(false)
-        expect(b.claimed).toBe(true)
+        expect(a.status).toBe(ModuleStatus.Mounted)
+        expect(b.status).not.toBe(ModuleStatus.Mounted)
+        expect(b.status).toBeOneOf([ModuleStatus.Destroying, ModuleStatus.Destroyed])
     })
 })

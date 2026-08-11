@@ -2,13 +2,14 @@ import { act, cleanup, render } from "@testing-library/react"
 import { beforeAll, describe, expect, it } from "vitest"
 import { useEffect, type ReactNode } from "react"
 
-import type { Provider } from "../../src/core/provider/provider.types.js"
-import { App, type Module } from "../../src/core/module/module.js"
-import { PropsRef } from "../../src/core/providers/props-ref/props-ref.provider.js"
-import { AppProvider } from "../../src/react/providers/AppProvider.js"
-import { createModuleComponent } from "../../src/react/factories/createModuleComponent.js"
-import { useModule, useModuleRebuild } from "../../src/react/hooks/useModuleContext.js"
-import { useResolve } from "../../src/react/hooks/useResolve.js"
+import type { Provider } from "../../src/core/provider.types.js"
+import { App, type Module } from "../../src/core/module.js"
+import { ModuleStatus } from "../../src/core/module-lifecycle.types.js"
+import { PropsRef } from "../../src/primitives/props-ref.js"
+import { AppProvider } from "../../src/react/AppProvider.js"
+import { createModuleComponent } from "../../src/react/createModuleComponent.js"
+import { useModule, useModuleRebuild } from "../../src/react/useModuleContext.js"
+import { useResolve } from "../../src/react/useResolve.js"
 import { EAGER, LAZY, makeProviders, type EagerService, type LazyService } from "./fixtures.js"
 import { HeapTrend, LeakTracker, assertGcEnabled, scrub, settle } from "./gc.js"
 
@@ -105,7 +106,11 @@ async function cycle(tracker: LeakTracker): Promise<void> {
 
     hold.rebuild = null
 
-    await app.destroy()
+    // `AppProvider`'s cleanup already unmounted and destroyed the App, and `settle()` above waited for the
+    // deferred destroy to land — so the belt-and-braces `app.destroy()` this used to end on is now a
+    // refusal. Asserting the arc completed is the stronger check anyway: if React ever stopped destroying
+    // the App, this line would fail here rather than being silently papered over by a manual destroy.
+    expect(app.status).toBe(ModuleStatus.Destroyed)
 }
 
 // Components

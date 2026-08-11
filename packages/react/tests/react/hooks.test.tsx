@@ -2,12 +2,12 @@ import { act, render } from "@testing-library/react"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import { useState, type ReactNode } from "react"
 
-import { Container, Scope } from "@remodulo/container"
+import { Resolver, Scope } from "@remodulo/container"
 import type { ResolveAllMode, ResolveMode } from "@remodulo/container"
-import { ModuleProvider } from "../../src/react/providers/ModuleProvider.js"
-import { useContainer, useModuleContext, useModuleRebuild } from "../../src/react/hooks/useModuleContext.js"
-import { useResolve, useResolveOptional } from "../../src/react/hooks/useResolve.js"
-import { useResolveAll } from "../../src/react/hooks/useResolveAll.js"
+import { ModuleProvider } from "../../src/react/ModuleProvider.js"
+import { useModuleContext, useModuleRebuild, useResolver } from "../../src/react/useModuleContext.js"
+import { useResolve, useResolveOptional } from "../../src/react/useResolve.js"
+import { useResolveAll } from "../../src/react/useResolveAll.js"
 import { Root } from "../setup/react.js"
 
 // Resolution hooks
@@ -454,15 +454,15 @@ describe("useResolveAll", () => {
     })
 })
 
-describe("useModuleContext, useContainer, useModuleRebuild", () => {
+describe("useModuleContext, useResolver, useModuleRebuild", () => {
     it("all read the same context value", () => {
         let context: ReturnType<typeof useModuleContext> | null = null
-        let container: Container | null = null
+        let resolver: Resolver | null = null
         let rebuild: (() => void) | null = null
 
         function Probe(): ReactNode {
             context = useModuleContext()
-            container = useContainer()
+            resolver = useResolver()
             rebuild = useModuleRebuild()
             return null
         }
@@ -475,9 +475,9 @@ describe("useModuleContext, useContainer, useModuleRebuild", () => {
             </Root>
         )
 
-        expect(container).toBe(context!.module.container)
+        expect(resolver).toBe(context!.module.resolver)
         expect(rebuild).toBe(context!.rebuild)
-        expect(container).toBeInstanceOf(Container)
+        expect(resolver).toBeInstanceOf(Resolver)
     })
 
     it("keeps the rebuild function identity stable across re-renders", () => {
@@ -511,14 +511,16 @@ describe("useModuleContext, useContainer, useModuleRebuild", () => {
 
     it("throws outside a ModuleProvider", () => {
         const restore = silenceReactErrorLog()
-        const message = new Error("useModuleContext: no module in context. Wrap with <ModuleProvider>.")
+        const message = new Error(
+            "useModuleContext: no module in context. Wrap with <AppProvider> or <ModuleProvider>."
+        )
 
         function Context(): ReactNode {
             useModuleContext()
             return null
         }
-        function UseContainer(): ReactNode {
-            useContainer()
+        function UseResolver(): ReactNode {
+            useResolver()
             return null
         }
         function UseRebuild(): ReactNode {
@@ -527,13 +529,13 @@ describe("useModuleContext, useContainer, useModuleRebuild", () => {
         }
 
         expect(() => render(<Context />)).toThrowError(message)
-        expect(() => render(<UseContainer />)).toThrowError(message)
+        expect(() => render(<UseResolver />)).toThrowError(message)
         expect(() => render(<UseRebuild />)).toThrowError(message)
 
         restore()
     })
 
-    it("throws from useResolve outside a ModuleProvider, through useContainer", () => {
+    it("throws from useResolve outside a ModuleProvider, through useResolver", () => {
         const restore = silenceReactErrorLog()
 
         function Probe(): ReactNode {
@@ -542,7 +544,7 @@ describe("useModuleContext, useContainer, useModuleRebuild", () => {
         }
 
         expect(() => render(<Probe />)).toThrowError(
-            new Error("useModuleContext: no module in context. Wrap with <ModuleProvider>.")
+            new Error("useModuleContext: no module in context. Wrap with <AppProvider> or <ModuleProvider>.")
         )
 
         restore()

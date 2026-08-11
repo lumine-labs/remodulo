@@ -1,13 +1,14 @@
 import { act, render } from "@testing-library/react"
 import { beforeEach, describe, expect, it, vi } from "vitest"
-import { useState } from "react"
+import { useMemo, useState } from "react"
 
-import { createModuleComponent } from "../../src/react/factories/createModuleComponent.js"
-import { ModuleProvider } from "../../src/react/providers/ModuleProvider.js"
-import { PropsRef, type PropsAdapter } from "../../src/core/providers/props-ref/props-ref.provider.js"
-import { useResolve } from "../../src/react/hooks/useResolve.js"
+import { createModuleComponent } from "../../src/react/createModuleComponent.js"
+import { ModuleProvider } from "../../src/react/ModuleProvider.js"
+import { PropsRef, type PropsAdapter } from "../../src/primitives/props-ref.js"
+import { useResolve } from "../../src/react/useResolve.js"
 import { inject } from "@remodulo/container"
 import type { InjectionToken } from "@remodulo/container"
+import { flush } from "../setup/helpers.js"
 import { Root } from "../setup/react.js"
 
 // Pre-1.0 hardening for the props bridge. Everything here pins BEHAVIOUR AS MEASURED, not behaviour as
@@ -424,15 +425,18 @@ describe("PropsRef shallow-equality gate", () => {
     })
 })
 
-// Notification hazards — the subscriber Set is iterated live
+// Notification re-entrancy — the subscriber Set is SNAPSHOT before the pass
 // ========================================
 //
-// MEASURED SEMANTICS: `notify` does `for (const cb of this.subscribers)` over the live `Set`. Mutating the
-// set from inside a subscriber therefore affects the pass that is running. All four cases below are pinned
-// as-measured; none of them is documented.
+// THE CONTRACT: `notify` does `for (const cb of [...this.subscribers])`. The pass runs against the set as
+// it stood when the pass began, so subscribing or unsubscribing from inside a subscriber cannot change who
+// this pass reaches — it takes effect from the next one. That makes a notification pass a fixed list
+// rather than a moving target, which is the only version of this that is reasonable to depend on: under
+// live iteration, whether your subscriber ran depended on where it happened to sit in insertion order
+// relative to whoever mutated the set.
 
 describe("PropsRef notification re-entrancy", () => {
-    it("SKIPS a later subscriber that an earlier one unsubscribes mid-notification", () => {
+    it("STILL CALLS a later subscriber that an earlier one unsubscribes mid-notification", () => {
         const ref = new PropsRef<Data>({ props: { label: "a", count: 1 } })
         const later = vi.fn()
 
@@ -442,8 +446,12 @@ describe("PropsRef notification re-entrancy", () => {
 
         ref.update({ label: "b", count: 2 })
 
-        // Deleting a not-yet-visited Set entry removes it from the running iteration.
-        expect(later).not.toHaveBeenCalled()
+        // It was in the set when the pass began, so the pass owes it this one call.
+        expect(later).toHaveBeenCalledTimes(1)
+
+        // The unsubscribe took effect for everything after.
+        ref.update({ label: "c", count: 3 })
+        expect(later).toHaveBeenCalledTimes(1)
     })
 
     it("still delivers to an EARLIER subscriber that a later one unsubscribes mid-notification", () => {
@@ -460,7 +468,7 @@ describe("PropsRef notification re-entrancy", () => {
         expect(earlier).toHaveBeenCalledTimes(1)
     })
 
-    it("CALLS a subscriber added mid-notification, inside that same pass, with that pass's (next, prev)", () => {
+    it("DEFERS a subscriber added mid-notification to the next pass, never the one that added it", () => {
         const ref = new PropsRef<Data>({ props: { label: "a", count: 1 } })
         const late = vi.fn()
         let added = false
@@ -471,12 +479,19 @@ describe("PropsRef notification re-entrancy", () => {
             ref.onUpdate(late)
         })
 
-        const next: Data = { label: "b", count: 2 }
-        ref.update(next)
+        const first: Data = { label: "b", count: 2 }
+        ref.update(first)
+
+        // Missing the pass it was added in is the point: a subscriber never sees a transition that was
+        // already in flight when it registered, so it cannot observe a `prev` it was never around for.
+        expect(late).not.toHaveBeenCalled()
+
+        const second: Data = { label: "c", count: 3 }
+        ref.update(second)
 
         expect(late).toHaveBeenCalledTimes(1)
-        expect(late.mock.calls[0]![0]).toBe(next)
-        expect(late.mock.calls[0]![1]).toEqual({ label: "a", count: 1 })
+        expect(late.mock.calls[0]![0]).toBe(second)
+        expect(late.mock.calls[0]![1]).toBe(first)
     })
 
     it("keeps a self-unsubscribing subscriber's throw from taking the rest of the pass down", () => {
@@ -567,7 +582,7 @@ describe("PropsRef notification re-entrancy", () => {
 // Rebuild — the documented footgun, made visible
 // ========================================
 //
-// MEASURED SEMANTICS: the bridge is COMPONENT-owned. A `rebuildOn` change tears down the container and
+// MEASURED SEMANTICS: the bridge is COMPONENT-owned. A `deps` change tears down the container and
 // rebuilds it, but `usePropsRef`'s `useState` initializer never re-runs, so the SAME `PropsRef` instance is
 // re-registered into the new container — and its subscriber Set is never touched by the rebuild. A service
 // from a dead generation that did not `off()` in `onModuleDestroy` therefore keeps receiving every future
@@ -587,7 +602,7 @@ describe("PropsRef across a module rebuild", () => {
     let instances: LeakyService[] = []
 
     const LeakyModule = createModuleComponent<UserProps>((props) => ({
-        rebuildOn: [props.userId],
+        deps: [props.userId],
         providers: [
             {
                 provide: LeakyService,
@@ -704,7 +719,7 @@ describe("PropsRef and the documented remedy (off() in onModuleDestroy)", () => 
     let instances: TidyService[] = []
 
     const TidyModule = createModuleComponent<UserProps>((props) => ({
-        rebuildOn: [props.userId],
+        deps: [props.userId],
         providers: [
             {
                 provide: TidyService,
@@ -736,7 +751,7 @@ describe("PropsRef and the documented remedy (off() in onModuleDestroy)", () => 
 
     it("notifies the OUTGOING generation of the very props change that rebuilds it", () => {
         // MEASURED, and worth knowing even when your services are well-behaved. The layout-effect order is:
-        // ModuleProvider's rebuildOn diff (which only SCHEDULES a rebuild) → usePropsRef's `ref.update(props)`
+        // ModuleProvider's deps diff (which only SCHEDULES a rebuild) → usePropsRef's `ref.update(props)`
         // → the scheduled rebuild. So the bridge applies the identity change while the outgoing generation is
         // still subscribed and still alive. The change is then observed TWICE by two different instances:
         // once as an `onUpdate` on the dying service, once as `current` in the incoming service's constructor.
@@ -752,19 +767,36 @@ describe("PropsRef and the documented remedy (off() in onModuleDestroy)", () => 
         expect(instances[1]!.seen).toEqual([])
     })
 
-    it("drops the dead generation's subscription without waiting for a microtask turn", () => {
-        // `#runDestroyPhase` evaluates `instance.onModuleDestroy?.()` synchronously before awaiting it, and
-        // the effect cleanup that triggers destroy runs inside `act`. A synchronous `onModuleDestroy` on the
-        // last-constructed instance therefore lands within the same `act` as the rebuild — the following
-        // change never reaches generation 0, with no await in between.
+    it("drops the dead generation's subscription one macrotask late, when the deferred destroy runs", async () => {
+        // MEASURED, and the cost of the deferred destroy. The PropsRef is COMPONENT-owned — `usePropsRef`
+        // holds it in a `useState` and registers the same instance into every generation — so a retired
+        // service stays on the shared ref until its own `off()` runs, and `off()` lives in `onModuleDestroy`.
+        // ModuleProvider's cleanup no longer destroys; it schedules. The remedy still works, one turn late,
+        // and any props change inside that window is delivered to BOTH generations.
         render(<Harness />)
 
         act(() => setProps?.({ userId: "u2", name: "Cara" }))
         act(() => setProps?.({ userId: "u2", name: "Dee" }))
 
         expect(instances).toHaveLength(2)
-        expect(instances[0]!.seen).toEqual([{ userId: "u2", name: "Cara" }])
+        expect(instances[0]!.seen).toEqual([
+            { userId: "u2", name: "Cara" },
+            { userId: "u2", name: "Dee" },
+        ])
         expect(instances[1]!.seen).toEqual([{ userId: "u2", name: "Dee" }])
+
+        // Once the timer fires the destroy phase runs, `off()` lands, and the window is shut for good.
+        await flush()
+        act(() => setProps?.({ userId: "u2", name: "Eve" }))
+
+        expect(instances[0]!.seen).toEqual([
+            { userId: "u2", name: "Cara" },
+            { userId: "u2", name: "Dee" },
+        ])
+        expect(instances[1]!.seen).toEqual([
+            { userId: "u2", name: "Dee" },
+            { userId: "u2", name: "Eve" },
+        ])
     })
 
     it("leaves each generation with exactly its own farewell update, no matter how many rebuilds happened", async () => {
@@ -793,23 +825,33 @@ describe("PropsRef and the documented remedy (off() in onModuleDestroy)", () => 
 describe("PropsRef per sibling module", () => {
     type Point = { x: number }
 
+    // RESHAPED: `PropsAdapter<T>` is T -> T now, so the Point -> Boxed step moved to `use` (see `boxes`
+    // below) and the adapter is the identity-stable updater it always was underneath.
     function makeAdapter() {
         return {
-            create: vi.fn((initial: Point) => ({ boxed: initial })),
-            update: vi.fn(({ current, next }: { current: Boxed<Point>; next: Point }) => {
-                current.boxed = next
+            create: vi.fn((initial: Boxed<Point>) => initial),
+            update: vi.fn(({ current, next }: { current: Boxed<Point>; next: Boxed<Point> }) => {
+                current.boxed = next.boxed
                 return current
             }),
-        } satisfies PropsAdapter<Point, Boxed<Point>>
+        } satisfies PropsAdapter<Boxed<Point>>
     }
+
+    /**
+     * The enrichment half of what the old P -> T adapter did, as a custom hook — and MEMOISED, which is
+     * load-bearing. `PropsRef.update` guards on a shallow compare of what it was last handed; enrichment
+     * puts a nested object in that position, so an un-memoised `use` returns a fresh wrapper every render
+     * and the guard never fires. `use` is a real hook, so the fix is the ordinary one.
+     */
+    const boxes = (props: Point): Boxed<Point> => useMemo(() => ({ boxed: props }), [props.x])
 
     it("gives each sibling its own ref and its own adapter target, with no crosstalk", () => {
         const adapterA = makeAdapter()
         const adapterB = makeAdapter()
 
         // Same default class token in both — they never collide, because each mount owns its container.
-        const ModuleA = createModuleComponent<Point, Boxed<Point>>({}, { propsAdapter: adapterA })
-        const ModuleB = createModuleComponent<Point, Boxed<Point>>({}, { propsAdapter: adapterB })
+        const ModuleA = createModuleComponent<Point, Boxed<Point>>(undefined, { use: boxes, adapter: adapterA })
+        const ModuleB = createModuleComponent<Point, Boxed<Point>>(undefined, { use: boxes, adapter: adapterB })
 
         let refA: PropsRef<Boxed<Point>> | null = null
         let refB: PropsRef<Boxed<Point>> | null = null
@@ -847,9 +889,9 @@ describe("PropsRef per sibling module", () => {
 
         expect(refA as unknown).not.toBe(refB as unknown)
         expect(adapterA.create).toHaveBeenCalledTimes(1)
-        expect(adapterA.create).toHaveBeenCalledWith({ x: 1 })
+        expect(adapterA.create).toHaveBeenCalledWith({ boxed: { x: 1 } })
         expect(adapterB.create).toHaveBeenCalledTimes(1)
-        expect(adapterB.create).toHaveBeenCalledWith({ x: 100 })
+        expect(adapterB.create).toHaveBeenCalledWith({ boxed: { x: 100 } })
 
         const seenA: Array<Boxed<Point>> = []
         const seenB: Array<Boxed<Point>> = []
@@ -877,7 +919,7 @@ describe("PropsRef per sibling module", () => {
 
     it("runs create once per mount even when both siblings share one adapter object", () => {
         const shared = makeAdapter()
-        const PointModule = createModuleComponent<Point, Boxed<Point>>({}, { propsAdapter: shared })
+        const PointModule = createModuleComponent<Point, Boxed<Point>>(undefined, { use: boxes, adapter: shared })
 
         const refs: PropsRef<Boxed<Point>>[] = []
 
@@ -1003,7 +1045,7 @@ describe("PropsRef resolution through nested module scopes", () => {
         const CHILD: InjectionToken<PropsRef<{ n: number }>> = Symbol.for("tests.props.torture.child-token")
 
         const Outer = createModuleComponent<Who>()
-        const Inner = createModuleComponent<{ n: number }>({}, { propsToken: CHILD })
+        const Inner = createModuleComponent<{ n: number }>(undefined, { token: CHILD })
 
         let byClass: PropsRef<Who> | null = null
         let byToken: PropsRef<{ n: number }> | null = null

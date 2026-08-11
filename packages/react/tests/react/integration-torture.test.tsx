@@ -1,12 +1,22 @@
 import { act, render } from "@testing-library/react"
 import { describe, expect, it, vi } from "vitest"
-import { Component, Suspense, createContext, use, useContext, useState, type ReactNode } from "react"
+import {
+    Component,
+    Suspense,
+    createContext,
+    lazy,
+    use,
+    useContext,
+    useState,
+    type ComponentType,
+    type ReactNode,
+} from "react"
 
-import type { Provider } from "../../src/core/provider/provider.types.js"
-import type { Module } from "../../src/core/module/module.js"
-import { ModuleTraversal } from "../../src/core/providers/module-traversal/module-traversal.provider.js"
-import { ModuleProvider } from "../../src/react/providers/ModuleProvider.js"
-import { useModuleContext } from "../../src/react/hooks/useModuleContext.js"
+import type { Provider } from "../../src/core/provider.types.js"
+import type { Module } from "../../src/core/module.js"
+import { ModuleTraversal } from "../../src/core/module-traversal.js"
+import { ModuleProvider } from "../../src/react/ModuleProvider.js"
+import { useModuleContext } from "../../src/react/useModuleContext.js"
 import { Root } from "../setup/react.js"
 import { flush } from "../setup/helpers.js"
 
@@ -230,9 +240,9 @@ describe("<ModuleProvider key={…}>", () => {
         await flush()
 
         // MEASURED order: the new generation is built during render, the deleted fiber's cleanup runs first
-        // in the commit that follows (unmount, then the synchronous head of destroy), and only then does the
-        // new generation mount.
-        expect(log).toEqual(["S2:ctor", "S2:init", "S1:unmount", "S1:destroy", "S2:mount"])
+        // in the commit that follows — but that cleanup only UNMOUNTS and schedules the destroy, so the new
+        // generation mounts while the old one is still an intact, retired module.
+        expect(log).toEqual(["S2:ctor", "S2:init", "S1:unmount", "S2:mount", "S1:destroy"])
         expect(tracker.generations.length).toBe(2)
         expect(tracker.generations[0]).toEqual(DISPOSED)
         expect(tracker.generations[1]).toEqual(ALIVE)
@@ -591,6 +601,110 @@ describe("a React context above <ModuleProvider>", () => {
 
 // Suspense
 // ========================================
+
+// The supported Suspense shapes
+// ========================================
+//
+// THE RULE: a ModuleProvider must never be hidden after it has committed; anything that only delays its
+// first mount is supported. The two shapes below are the legal ones, pinned as regressions. The illegal one
+// — suspendable content directly inside a module, suspending a boundary ABOVE the provider — is doctrine
+// rather than a target, and the cost of doing it anyway is measured in "Suspense at module level" below.
+
+describe("the supported Suspense shapes", () => {
+    /** A lazy component whose chunk this test resolves by hand, so nothing depends on timing. */
+    function chunkOf(render: () => ReactNode): { Lazy: ComponentType; release: () => void } {
+        let release!: () => void
+        const chunk = new Promise<{ default: ComponentType }>((resolve) => {
+            release = () => resolve({ default: () => render() })
+        })
+        return { Lazy: lazy(() => chunk), release }
+    }
+
+    it("LEGAL: an inner boundary absorbs the suspension, and the module around it is never hidden", async () => {
+        const log: string[] = []
+        const tracker = genTracker(log)
+        const { Lazy, release } = chunkOf(() => <span data-testid="content">content</span>)
+
+        let view!: ReturnType<typeof render>
+        await act(async () => {
+            view = render(
+                <Root>
+                    <Suspense fallback={<span data-testid="outer">outer</span>}>
+                        <ModuleProvider providers={[tracker.provider]}>
+                            <Suspense fallback={<span data-testid="inner">inner</span>}>
+                                <Lazy />
+                            </Suspense>
+                        </ModuleProvider>
+                    </Suspense>
+                </Root>
+            )
+        })
+        const { getByTestId, queryByTestId } = view
+
+        // The inner boundary catches it, so the provider COMMITS while its content is still pending — the
+        // outer fallback is never reached, and the module is mounted the whole time.
+        expect(getByTestId("inner")).toBeInTheDocument()
+        expect(queryByTestId("outer")).toBeNull()
+        expect(tracker.generations).toEqual([{ init: 1, mount: 1, unmount: 0, destroy: 0 }])
+
+        await act(async () => {
+            release()
+            await flush()
+        })
+
+        // Child arrives, and the module is untouched by its suspension: one generation, still mounted,
+        // never unmounted. Compare "Suspense at module level", where the boundary sits ABOVE the provider
+        // and every retry compounds an abandoned generation.
+        expect(getByTestId("content")).toBeInTheDocument()
+        expect(tracker.generations).toEqual([{ init: 1, mount: 1, unmount: 0, destroy: 0 }])
+        expect(log).toEqual(["S1:ctor", "S1:init", "S1:mount"])
+    })
+
+    it("LEGAL: a lazy wrapper delays the first mount, and no module exists while it waits", async () => {
+        const log: string[] = []
+        const tracker = genTracker(log)
+        const { Lazy, release } = chunkOf(() => (
+            <ModuleProvider providers={[tracker.provider]}>
+                <span data-testid="content">content</span>
+            </ModuleProvider>
+        ))
+
+        let view!: ReturnType<typeof render>
+        await act(async () => {
+            view = render(
+                <Root>
+                    <Suspense fallback={<span data-testid="fallback">…</span>}>
+                        <Lazy />
+                    </Suspense>
+                </Root>
+            )
+        })
+        const { getByTestId } = view
+
+        // The suspension happens BEFORE the provider exists: the ModuleProvider is inside the chunk, so
+        // there is no module to hide and nothing to abandon. Zero constructions while the fallback shows.
+        expect(getByTestId("fallback")).toBeInTheDocument()
+        expect(tracker.generations).toHaveLength(0)
+        expect(log).toEqual([])
+
+        await act(async () => {
+            release()
+            await flush()
+        })
+
+        // Exactly one generation, mounted once — a delayed first mount, which is the supported half of the
+        // rule.
+        expect(getByTestId("content")).toBeInTheDocument()
+        expect(tracker.generations).toEqual([{ init: 1, mount: 1, unmount: 0, destroy: 0 }])
+
+        await act(async () => {
+            view.unmount()
+            await flush()
+        })
+
+        expect(tracker.generations).toEqual([{ init: 1, mount: 1, unmount: 1, destroy: 1 }])
+    })
+})
 
 describe("Suspense at module level", () => {
     it("re-runs construction and init on every abandoned render attempt, but mounts exactly once", async () => {

@@ -3,9 +3,9 @@ import { describe, expect, it } from "vitest"
 import { useState, type JSX, type ReactNode } from "react"
 
 import { inject } from "@remodulo/container"
-import { Ref, RefMap } from "../../src/core/providers/ref/ref.provider.js"
-import { ModuleProvider } from "../../src/react/providers/ModuleProvider.js"
-import { useResolve } from "../../src/react/hooks/useResolve.js"
+import { Ref, RefMap } from "../../src/primitives/ref.js"
+import { ModuleProvider } from "../../src/react/ModuleProvider.js"
+import { useResolve } from "../../src/react/useResolve.js"
 import type { Provider } from "../../src/types.js"
 import { Root } from "../setup/react.js"
 
@@ -19,7 +19,7 @@ import { Root } from "../setup/react.js"
 //      reading `ref.current` in `onModuleMount` therefore already sees the element.
 //   2. on deletion React detaches refs (calls the callback with null) before it runs passive cleanups, so
 //      `onModuleUnmount` sees null.
-//   3. a `rebuildOn` swap builds a new module, so the new generation resolves a FRESH holder.
+//   3. a `deps` swap builds a new module, so the new generation resolves a FRESH holder.
 //
 // No decorators and no metadata emit: the service reads its holder with `inject()` from the kernel's
 // construction frame.
@@ -115,7 +115,7 @@ describe("Ref across a rebuild", () => {
             bump = () => setGeneration((current) => current + 1)
 
             return (
-                <ModuleProvider providers={[InputRef]} rebuildOn={[generation]}>
+                <ModuleProvider providers={[InputRef]} deps={[generation]}>
                     <Collect />
                 </ModuleProvider>
             )

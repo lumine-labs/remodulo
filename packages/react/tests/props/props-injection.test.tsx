@@ -3,13 +3,13 @@ import { act } from "@testing-library/react"
 import { describe, expect, it } from "vitest"
 import { useState } from "react"
 
-import { createModuleComponent } from "../../src/react/factories/createModuleComponent.js"
-import { ModuleProvider } from "../../src/react/providers/ModuleProvider.js"
-import { PropsRef, type PropsAdapter } from "../../src/core/providers/props-ref/props-ref.provider.js"
-import { useResolve } from "../../src/react/hooks/useResolve.js"
+import { createModuleComponent } from "../../src/react/createModuleComponent.js"
+import { ModuleProvider } from "../../src/react/ModuleProvider.js"
+import { PropsRef, type PropsAdapter } from "../../src/primitives/props-ref.js"
+import { useResolve } from "../../src/react/useResolve.js"
 import { inject, injectOptional } from "@remodulo/container"
 import type { InjectionToken } from "@remodulo/container"
-import type { Provider } from "../../src/core/provider/provider.types.js"
+import type { Provider } from "../../src/core/provider.types.js"
 import { Root } from "../setup/react.js"
 
 // The documented consumer shape: a service reaches the bridge from its own construction frame. No
@@ -75,10 +75,10 @@ describe("PropsRef through constructor injection", () => {
         type Boxed = { boxed: UserProps }
         const TOKEN: InjectionToken<PropsRef<Boxed>> = Symbol.for("tests.props.injection.custom")
 
-        const adapter: PropsAdapter<UserProps, Boxed> = {
-            create: (initial) => ({ boxed: initial }),
+        const adapter: PropsAdapter<Boxed> = {
+            create: (initial) => initial,
             update: ({ current, next }) => {
-                current.boxed = next
+                current.boxed = next.boxed
                 return current
             },
         }
@@ -86,7 +86,7 @@ describe("PropsRef through constructor injection", () => {
         const Service = injectingService(TOKEN)
         const UserModule = createModuleComponent<UserProps, Boxed>(
             { providers: [Service as unknown as Provider] },
-            { propsAdapter: adapter, propsToken: TOKEN }
+            { use: (props) => ({ boxed: props }), adapter, token: TOKEN }
         )
 
         let resolved: InstanceType<typeof Service> | null = null

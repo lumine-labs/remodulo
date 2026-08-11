@@ -2,12 +2,20 @@
 // ========================================
 
 export { Container } from "./container.js"
-export { RegistrationMode, ResolveAllMode, ResolveMode, Scope } from "./container.types.js"
+export { ContainerEvent, RegistrationMode, ResolveAllMode, ResolveMode, Scope } from "./container.types.js"
+export { Resolver } from "./resolver.js"
 
 // Injection
 // ========================================
 
-export { inject, injectAll, injectContainer, injectOptional, runInInjectionContext } from "./injector.js"
+export {
+    inject,
+    injectOptional,
+    injectAll,
+    injectContainer,
+    injectResolver,
+    runInInjectionContext,
+} from "./injector.js"
 
 // Errors
 // ========================================

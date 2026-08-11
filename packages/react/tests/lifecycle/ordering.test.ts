@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 
 import { inject } from "@remodulo/container"
-import type { Provider } from "../../src/core/provider/provider.types.js"
+import type { Provider } from "../../src/core/provider.types.js"
 import { makeApp, makeChild, phase, tracked } from "../setup/helpers.js"
 
 // Phase ordering.

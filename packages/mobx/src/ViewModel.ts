@@ -5,40 +5,80 @@ import type { ProviderLifecycle } from "@remodulo/react"
 
 export type Disposer = () => void
 
-export abstract class ViewModel implements ProviderLifecycle {
-    readonly #disposers: Disposer[] = []
-    #controller: AbortController | null = null
+const HOOKS = ["onModuleInit", "onModuleMount", "onModuleUnmount", "onModuleDestroy"] as const
+const SHORT: Record<(typeof HOOKS)[number], string> = {
+    onModuleInit: "onInit",
+    onModuleMount: "onMount",
+    onModuleUnmount: "onUnmount",
+    onModuleDestroy: "onDestroy",
+}
 
+export abstract class ViewModel implements ProviderLifecycle {
     constructor() {
-        const override = this.onModuleDestroy
-        if (override !== ViewModel.prototype.onModuleDestroy) {
-            Object.defineProperty(this, "onModuleDestroy", {
-                configurable: true,
-                enumerable: true,
-                writable: true,
-                value: (): void => {
-                    try {
-                        override.call(this)
-                    } finally {
-                        this.#teardown()
-                    }
-                },
-            })
+        for (
+            let proto = Object.getPrototypeOf(this);
+            proto !== ViewModel.prototype;
+            proto = Object.getPrototypeOf(proto)
+        ) {
+            for (const key of HOOKS) {
+                if (Object.getOwnPropertyDescriptor(proto, key)) {
+                    throw new Error(`ViewModel seals ${key}() — override ${SHORT[key]}() instead.`)
+                }
+            }
+        }
+        for (const key of HOOKS) {
+            Object.defineProperty(this, key, { value: ViewModel.prototype[key], writable: false, configurable: false })
         }
     }
 
-    protected track<T extends Disposer>(disposer: T): T {
-        this.#disposers.push(disposer)
-        return disposer
+    // Hooks
+    // ----------------------------------------
+
+    /** @internal */
+    onModuleInit(): void {
+        this.onInit?.()
     }
+    /** @internal */
+    onModuleMount(): void {
+        this.onMount?.()
+    }
+    /** @internal */
+    onModuleUnmount(): void {
+        this.onUnmount?.()
+    }
+    /** @internal */
+    onModuleDestroy(): void {
+        try {
+            this.onDestroy?.()
+        } finally {
+            this.#teardown()
+        }
+    }
+
+    // Shorthand overrides for lifecycle hooks
+    protected onInit?(): void
+    protected onMount?(): void
+    protected onUnmount?(): void
+    protected onDestroy?(): void
+
+    // AbortController
+    // ----------------------------------------
+
+    #controller: AbortController | null = null
 
     protected signal(): AbortSignal {
         this.#controller ??= new AbortController()
         return this.#controller.signal
     }
 
-    onModuleDestroy(): void {
-        this.#teardown()
+    // Disposers
+    // ----------------------------------------
+
+    readonly #disposers: Disposer[] = []
+
+    protected track<T extends Disposer>(disposer: T): T {
+        this.#disposers.push(disposer)
+        return disposer
     }
 
     #teardown(): void {

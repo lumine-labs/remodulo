@@ -2,11 +2,12 @@ import { act, render } from "@testing-library/react"
 import { describe, expect, it } from "vitest"
 import { useState, type ReactNode } from "react"
 
-import { Module } from "../../src/core/module/module.js"
-import { Resolver } from "../../src/core/providers/resolver/resolver.provider.js"
-import { useModuleContext, useModuleRebuild } from "../../src/react/hooks/useModuleContext.js"
-import { useResolve } from "../../src/react/hooks/useResolve.js"
-import { ModuleProvider } from "../../src/react/providers/ModuleProvider.js"
+import { Resolver } from "@remodulo/container"
+import { Module } from "../../src/core/module.js"
+import { ModuleStatus } from "../../src/core/module-lifecycle.types.js"
+import { useModuleContext, useModuleRebuild } from "../../src/react/useModuleContext.js"
+import { useResolve } from "../../src/react/useResolve.js"
+import { ModuleProvider } from "../../src/react/ModuleProvider.js"
 import type { Provider } from "../../src/types.js"
 import { Root } from "../setup/react.js"
 import { flush, type HookCounts } from "../setup/helpers.js"
@@ -142,11 +143,11 @@ describe("rebuild generation identity", () => {
         expect(fresh.parent).toBe(old!.parent)
         expect(fresh.id).toBe("feature")
 
-        // The outgoing module keeps `initialized` (it was, historically) but is no longer mounted, and the
-        // incoming one is live.
-        expect(old!.mounted).toBe(false)
-        expect(old!.initialized).toBe(true)
-        expect(fresh.mounted).toBe(true)
+        // The outgoing module never returns to a pre-init status (it WAS initialized, historically) but is
+        // no longer mounted, and the incoming one is live.
+        expect(old!.status).not.toBe(ModuleStatus.Mounted)
+        expect(old!.status).not.toBeOneOf([ModuleStatus.Created, ModuleStatus.Failed])
+        expect(fresh.status).toBe(ModuleStatus.Mounted)
     })
 
     it("detaches the old module from its parent and attaches the new one in its place", async () => {
@@ -262,13 +263,19 @@ describe("rebuild teardown of the subtree", () => {
         expect(newInstance).not.toBe(oldInstance)
         expect(resolved).toEqual([oldInstance, newInstance])
 
-        // A HELD reference does not. The old Resolver was constructed against the old container and is
-        // never rewired — it keeps handing out generation 1, which by now is unmounted and destroyed.
-        // This is the reference-invalidation semantic: old references are corpses, not stale proxies.
-        expect(oldResolver.resolve<object>(SERVICE)).toBe(oldInstance)
-        expect(oldResolver.resolve(Module)).toBe(oldModule)
-        expect(oldResolver.resolve(Module)).not.toBe(newModule)
-        expect(oldContainer.resolve(Resolver)).toBe(oldResolver)
+        // A HELD reference does not — and FLIPPED when `destroyed` joined the resolution gate's refuse-set,
+        // the semantic got sharper rather than weaker. The old Resolver was built against the old container
+        // and is never rewired, so it could only ever hand back generation 1; it used to do exactly that,
+        // and the cell pinned "old references are corpses, not stale proxies". Now the door is shut: the
+        // container's own module is destroyed, so every read through it refuses. Still not rewired to
+        // generation 2 — which was the thing worth pinning — and now loud about it instead of quietly
+        // serving a corpse.
+        const buried = /from a module whose status is "destroyed"/
+        expect(() => oldResolver.resolve<object>(SERVICE)).toThrow(buried)
+        expect(() => oldResolver.resolve(Module)).toThrow(buried)
+        expect(() => oldContainer.resolve(Resolver)).toThrow(buried)
+
+        // The live generation is unaffected, and hands out a resolver of its own.
         expect(newModule.container.resolve(Resolver)).not.toBe(oldResolver)
 
         expect(service.lives).toEqual([
@@ -314,8 +321,9 @@ describe("rebuild across nested boundaries", () => {
         })
         await flush()
 
-        // A rebuild travels down, never up or sideways: only the child's own generation advances.
-        expect(log).toEqual(["C#2:ctor", "C#2:init", "C#1:unmount", "C#1:destroy", "C#2:mount"])
+        // A rebuild travels down, never up or sideways: only the child's own generation advances. The
+        // outgoing generation's destroy is deferred, so it lands after its replacement is already mounted.
+        expect(log).toEqual(["C#2:ctor", "C#2:init", "C#1:unmount", "C#2:mount", "C#1:destroy"])
         expect(parentSvc.lives).toEqual([{ gen: 1, counts: LIVE }])
         expect(siblingSvc.lives).toEqual([{ gen: 1, counts: LIVE }])
         expect(childSvc.lives).toEqual([
@@ -327,7 +335,7 @@ describe("rebuild across nested boundaries", () => {
         // instances cannot.
         expect(parents).toEqual([parentModule])
         expect(siblings).toEqual([siblingModule])
-        expect(parentModule.mounted).toBe(true)
+        expect(parentModule.status).toBe(ModuleStatus.Mounted)
     })
 
     it("cascades into the child when the parent rebuilds, and each level advances exactly one generation", async () => {
@@ -361,22 +369,27 @@ describe("rebuild across nested boundaries", () => {
         })
         await flush()
 
-        // Two different orderings, and the difference is the point:
+        // ONE ordering now, and the collapse is the point. Both levels obey the same "new before old"
+        // contract: each builds its replacement first and tears the outgoing one down behind it.
         //
-        //   - the boundary that INITIATED the rebuild builds its replacement first (P#2 ctor/init) and only
-        //     then tears the outgoing one down — the "new before old" contract;
-        //   - a CASCADED child cannot: its replacement has to fork the new parent, which does not exist
-        //     until the parent's teardown has completed. So C#3 is constructed after C#2 is destroyed.
+        // A cascaded child still has to fork the new parent, and still cannot be built before it exists —
+        // but it no longer has to wait for the parent to COMMIT. The parent's replacement is created during
+        // its own render pass, the child sees the new parent while that pass is still running, and builds
+        // against it there. So C#3 is constructed immediately after P#2, before either level's effects run,
+        // where it used to appear after `P#2:mount` one full pass later.
+        //
+        // Both DESTROYS still trail the whole rebuild, in the order the two cleanups scheduled them: the
+        // provider's cleanup retires a generation synchronously and only schedules its death.
         expect(log).toEqual([
             "P#2:ctor",
             "P#2:init",
-            "C#2:unmount",
-            "P#1:unmount",
-            "C#2:destroy",
-            "P#2:mount",
             "C#3:ctor",
             "C#3:init",
+            "C#2:unmount",
+            "P#1:unmount",
+            "P#2:mount",
             "C#3:mount",
+            "C#2:destroy",
             "P#1:destroy",
         ])
 
@@ -407,7 +420,7 @@ describe("consecutive rebuilds", () => {
             bump = () => setDep((value) => value + 1)
             return (
                 <Root>
-                    <ModuleProvider providers={[service.provider]} rebuildOn={[dep]}>
+                    <ModuleProvider providers={[service.provider]} deps={[dep]}>
                         <Rebuilder capture={(fn) => (rebuild = fn)} />
                     </ModuleProvider>
                 </Root>
@@ -416,7 +429,7 @@ describe("consecutive rebuilds", () => {
 
         render(<Harness />)
 
-        // Two independent sources — a manual rebuild and a rebuildOn diff — in one flush.
+        // Two independent sources — a manual rebuild and a deps diff — in one flush.
         await act(async () => {
             rebuild?.()
             bump?.()
@@ -424,7 +437,7 @@ describe("consecutive rebuilds", () => {
         await flush()
 
         // Pinning the actual: the two triggers do NOT coalesce. The manual rebuild schedules under
-        // "module.rebuild" and flushes on the forced re-render; the rebuildOn diff is only observed on the
+        // "module.rebuild" and flushes on the forced re-render; the deps diff is only observed on the
         // render after that, so it schedules a second time. Three generations get built.
         //
         // Wasteful, not leaky — and that is the invariant worth having: the middle generation is mounted
@@ -464,7 +477,7 @@ describe("consecutive rebuilds", () => {
         expectOneLiveGeneration(service)
     })
 
-    it("survives a burst of rebuilds interleaved with rebuildOn churn", async () => {
+    it("survives a burst of rebuilds interleaved with deps churn", async () => {
         const log: string[] = []
         const service = generational(log, "S")
         const modules: Module[] = []
@@ -476,7 +489,7 @@ describe("consecutive rebuilds", () => {
             bump = () => setDep((value) => value + 1)
             return (
                 <Root>
-                    <ModuleProvider providers={[service.provider]} rebuildOn={[dep]}>
+                    <ModuleProvider providers={[service.provider]} deps={[dep]}>
                         <Rebuilder capture={(fn) => (rebuild = fn)} />
                         <ModuleProbe into={modules} />
                     </ModuleProvider>
@@ -504,8 +517,8 @@ describe("consecutive rebuilds", () => {
         // The context always points at the live generation, and every module it ever handed out is
         // distinct — no generation is re-entered.
         expect(new Set(modules).size).toBe(modules.length)
-        expect(modules.at(-1)!.mounted).toBe(true)
-        for (const dead of modules.slice(0, -1)) expect(dead.mounted).toBe(false)
+        expect(modules.at(-1)!.status).toBe(ModuleStatus.Mounted)
+        for (const dead of modules.slice(0, -1)) expect(dead.status).not.toBe(ModuleStatus.Mounted)
     })
 })
 
@@ -539,10 +552,10 @@ describe("rebuild with a lazily resolved provider", () => {
         // Nothing built by mount — that is what `lazy` buys.
         expect(lazy.lives).toEqual([])
 
-        // Resolved mid-generation, after the module has already mounted: it catches up with init alone,
-        // because mount is a tree event that has gone past.
+        // Resolved mid-generation, after the module has already mounted: the catch-up walks it through init
+        // and mount, so it joins its generation in the state that generation is in.
         const first = modules[0]!.container.resolve<object>(LAZY)
-        expect(lazy.lives).toEqual([{ gen: 1, counts: { init: 1, mount: 0, unmount: 0, destroy: 0 } }])
+        expect(lazy.lives).toEqual([{ gen: 1, counts: { init: 1, mount: 1, unmount: 0, destroy: 0 } }])
 
         await act(async () => {
             rebuild?.()
@@ -550,14 +563,74 @@ describe("rebuild with a lazily resolved provider", () => {
         await flush()
 
         // A late arrival is still a member of its module, so it unmounts and destroys with it...
-        expect(lazy.lives).toEqual([{ gen: 1, counts: { init: 1, mount: 0, unmount: 1, destroy: 1 } }])
+        expect(lazy.lives).toEqual([{ gen: 1, counts: { init: 1, mount: 1, unmount: 1, destroy: 1 } }])
 
         // ...and the new generation starts unresolved: a rebuild does not replay resolutions.
         const fresh = modules[1]!.container.resolve<object>(LAZY)
         expect(fresh).not.toBe(first)
         expect(lazy.lives).toEqual([
-            { gen: 1, counts: { init: 1, mount: 0, unmount: 1, destroy: 1 } },
-            { gen: 2, counts: { init: 1, mount: 0, unmount: 0, destroy: 0 } },
+            { gen: 1, counts: { init: 1, mount: 1, unmount: 1, destroy: 1 } },
+            { gen: 2, counts: { init: 1, mount: 1, unmount: 0, destroy: 0 } },
         ])
+    })
+})
+
+// The cascade collapses into one pass
+// ========================================
+//
+// THE point of moving the parent derivation into the render pass, and the only cell that measures it
+// directly. Under the effect-driven rebuild a cascade cost a pass per LEVEL: the parent committed, its
+// child's effect noticed the new parent, the child rebuilt, ITS child's effect noticed, and so on — so an
+// N-deep tree took N commits to settle, each one rendering and discarding a generation of modules below it.
+//
+// Deriving from `parent` during render collapses that: `setState` in render re-runs the provider
+// synchronously and discards the pass BEFORE any child renders, so the whole subtree sees the new parent in
+// the first pass that reaches it.
+
+describe("a parent rebuild's cascade", () => {
+    it("reaches a three-deep subtree in a single render pass per level, not a commit per level", async () => {
+        const renders: string[] = []
+        const modules: Record<string, Module[]> = { a: [], b: [], c: [] }
+        let rebuildRoot: (() => void) | null = null
+
+        function Probe({ level }: { level: "a" | "b" | "c" }): ReactNode {
+            const module = useModuleContext().module
+            renders.push(level)
+            if (modules[level].at(-1) !== module) modules[level].push(module)
+            return null
+        }
+
+        render(
+            <Root>
+                <ModuleProvider>
+                    <Rebuilder capture={(fn) => (rebuildRoot = fn)} />
+                    <Probe level="a" />
+                    <ModuleProvider>
+                        <Probe level="b" />
+                        <ModuleProvider>
+                            <Probe level="c" />
+                        </ModuleProvider>
+                    </ModuleProvider>
+                </ModuleProvider>
+            </Root>
+        )
+
+        renders.length = 0
+
+        await act(async () => {
+            rebuildRoot?.()
+        })
+        await flush()
+
+        // Every level advanced exactly one generation — the cascade reached the bottom.
+        expect(modules.a).toHaveLength(2)
+        expect(modules.b).toHaveLength(2)
+        expect(modules.c).toHaveLength(2)
+
+        // And it did it in ONE render each. The effect-driven cascade rendered each level twice — once
+        // with the stale parent it had just been handed, then again after its own effect rebuilt it — so
+        // this list carried a duplicate per level and grew with depth. If this ever reads six again, the
+        // derivation has fallen back into an effect.
+        expect(renders).toEqual(["a", "b", "c"])
     })
 })

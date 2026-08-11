@@ -15,12 +15,12 @@
  * a consumer outside this workspace cannot get that dependency any other way:
  *
  *   - `@remodulo/container` is declared as `workspace:^`, a protocol npm does not understand at all
- *     (EUNSUPPORTEDPROTOCOL). `pnpm pack` rewrites it to the real range (`^0.1.0`) exactly as `pnpm
+ *     (EUNSUPPORTEDPROTOCOL). `pnpm pack` rewrites it to the real range (`^0.2.0`) exactly as `pnpm
  *     publish` would, which is the first reason the tarball — and not the package directory — is what
  *     gets installed here.
  *   - that rewritten range then points at a version nobody has published yet, so npm would go to the
  *     registry and 404. Installing the container's own tarball ALONGSIDE the react one satisfies the
- *     range from the consumer's own tree: npm dedupes `^0.1.0` onto the 0.1.0 it already has.
+ *     range from the consumer's own tree: npm dedupes `^0.2.0` onto the 0.2.0 it already has.
  *
  * The two-tarball install is therefore not a convenience — it is the only arrangement in which an
  * external consumer of the unpublished pair can be typechecked at all, and it doubles as a rehearsal of
@@ -55,7 +55,7 @@ const packageRoot = resolve(consumersDir, "..", "..")
 const containerRoot = resolve(packageRoot, "..", "container")
 const tarballDir = join(consumersDir, ".tarballs")
 
-// Order matters: the kernel is packed and installed first, so the react tarball's `^0.1.0` has
+// Order matters: the kernel is packed and installed first, so the react tarball's `^0.2.0` has
 // something local to dedupe onto.
 const packages = [
     { name: "@remodulo/container", root: containerRoot, tarball: join(tarballDir, "remodulo-container.tgz") },

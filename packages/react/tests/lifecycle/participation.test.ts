@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest"
 
 import { Scope } from "@remodulo/container"
-import type { Provider } from "../../src/core/provider/provider.types.js"
+import type { Provider } from "../../src/core/provider.types.js"
 import type { HookCounts } from "../setup/helpers.js"
-import { makeApp, makeChild, phase, plain, tracked } from "../setup/helpers.js"
+import { makeApp, makeChild, phase, plain, refuses, tracked } from "../setup/helpers.js"
 
 // Who takes part in the lifecycle.
 // ========================================
@@ -152,7 +152,9 @@ describe("participation", () => {
         const service = tracked(log, "A")
         const module = makeApp({ providers: [service] })
 
-        module.unmount()
+        // A never-mounted module has nothing to retire, so unmount() is refused — and `initialized` is a
+        // state destroy() accepts on its own, so the module is disposable without ever having gone live.
+        expect(() => module.unmount()).toThrow(refuses("unmount", "initialized"))
         await module.destroy()
 
         expect(service.counts).toEqual({ init: 1, mount: 0, unmount: 0, destroy: 1 })
@@ -227,6 +229,34 @@ describe("participation", () => {
         child.unmount()
         await child.destroy()
 
+        expect(service.counts).toEqual({ init: 1, mount: 1, unmount: 0, destroy: 0 })
+
+        parent.unmount()
+        await parent.destroy()
+        expect(service.counts).toEqual(ONCE)
+    })
+
+    /**
+     * Adoption keys on OWNERSHIP, not on who asked. The sibling above resolves an instance the parent had
+     * already built; this one makes the descendant's read the construction itself, which is the only case
+     * where the two could ever have disagreed.
+     */
+    it("adopts into the owner when a descendant is first to resolve an ancestor's lazy singleton", async () => {
+        const log: string[] = []
+        const service = tracked(log, "A")
+        const parent = makeApp({ providers: [{ provide: service, useClass: service, lazy: true } as Provider] })
+        const child = makeChild(parent, { providers: [] })
+        child.mount()
+        parent.mount()
+
+        // Nothing has built it yet, so this read constructs it — and a construction is reported by the
+        // container that owns the entry, whichever container the read was made on.
+        child.container.resolve(service as never)
+        expect(service.counts).toEqual({ init: 1, mount: 1, unmount: 0, destroy: 0 })
+
+        // The child tears down and the instance is untouched: it joined the PARENT's participants.
+        child.unmount()
+        await child.destroy()
         expect(service.counts).toEqual({ init: 1, mount: 1, unmount: 0, destroy: 0 })
 
         parent.unmount()

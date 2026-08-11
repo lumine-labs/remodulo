@@ -311,7 +311,7 @@ describe("useClass without `provide`", () => {
 
         const container = new Container()
         container.register({ useClass: Service })
-        container.onResolution(Service, (instance) => seen.push(instance))
+        container.on("afterMaterialize", ({ instance }) => seen.push(instance))
 
         expect(seen).toEqual([container.resolve(Service)])
     })
@@ -436,6 +436,21 @@ describe("invalid providers", () => {
         )
     })
 
+    it("rejects a useFactory that is not callable", () => {
+        // The key is present and alone, so the grammar accepts the SHAPE and the arm itself is what
+        // refuses: a factory that cannot be called is no factory.
+        const TOKEN = Symbol("uncallable")
+        const container = new Container()
+
+        expect(() => container.register({ provide: TOKEN, useFactory: 42 } as unknown as Provider)).toThrow(
+            /^Provider for uncallable has no recognised form/
+        )
+        expect(() => container.register({ provide: TOKEN, useFactory: null } as unknown as Provider)).toThrow(
+            /^Provider for uncallable has no recognised form/
+        )
+        expect(container.isRegistered(TOKEN)).toBe(false)
+    })
+
     it("rejects a typo'd use* key", () => {
         const TOKEN = Symbol("typo")
         const container = new Container()
@@ -542,6 +557,20 @@ describe("mixed implementation keys", () => {
         expect(() => container.register({ provide: TOKEN, useValue: undefined })).not.toThrow()
         expect(container.isRegistered(TOKEN)).toBe(true)
         expect(container.resolve(TOKEN)).toBeUndefined()
+    })
+
+    it("rejects a lone `useExisting: undefined`, where the same key beside another is a mixed-key error", () => {
+        // The two `useExisting: undefined` cells above never reach this guard: each pairs the key with a
+        // second one, so the arity check refuses them first and the switch is never entered. ALONE, the
+        // key is the declared form, and the arm refuses it — an alias to nothing is not an alias. The
+        // contrast is `useValue: undefined` directly above, where `undefined` is a legitimate VALUE.
+        const TOKEN = Symbol("dangling-key")
+        const container = new Container()
+
+        expect(() => container.register({ provide: TOKEN, useExisting: undefined } as Provider)).toThrow(
+            /^Provider for dangling-key has no recognised form/
+        )
+        expect(container.isRegistered(TOKEN)).toBe(false)
     })
 })
 

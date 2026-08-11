@@ -3,9 +3,17 @@
 
 export type {
     AbstractConstructor,
+    AfterMaterializeEvent,
+    AfterResolutionEvent,
     AliasEntrySnapshot,
+    BeforeMaterializeEvent,
+    BeforeResolutionEvent,
     BindingEntrySnapshot,
+    ClassKey,
     Constructor,
+    ContainerEvent,
+    ContainerEventListener,
+    ContainerEventPayload,
     EntrySnapshot,
     InjectionToken,
     RegistrationMode,

@@ -2,8 +2,9 @@ import { describe, expect, it, vi } from "vitest"
 
 import { Container, Scope, inject, injectOptional } from "@remodulo/container"
 import type { Constructor, InjectionToken } from "@remodulo/container"
-import type { Provider } from "../../src/core/provider/provider.types.js"
-import { App, Module } from "../../src/core/module/module.js"
+import type { Provider } from "../../src/core/provider.types.js"
+import { App, Module } from "../../src/core/module.js"
+import { ModuleStatus } from "../../src/core/module-lifecycle.types.js"
 import { makeApp, makeChild } from "../setup/helpers.js"
 
 // Provider semantics under pressure.
@@ -647,8 +648,8 @@ describe("circular dependencies", () => {
         const app = new App({ providers: [Alpha as Provider, Beta as Provider] })
 
         expect(() => app.init()).toThrowError("Circular dependency found: Alpha -> Beta -> Alpha")
-        expect(app.initialized).toBe(false)
-        expect(app.mounted).toBe(false)
+        expect(app.status).toBeOneOf([ModuleStatus.Created, ModuleStatus.Failed])
+        expect(app.status).not.toBe(ModuleStatus.Mounted)
     })
 
     /**
@@ -728,8 +729,8 @@ describe("a provider constructor that throws", () => {
         const module = new App({ providers: [{ provide: THROWS, useClass: Exploding } as Provider] })
 
         expect(() => module.init()).toThrowError("boom from a constructor")
-        expect(module.initialized).toBe(false)
-        expect(module.mounted).toBe(false)
+        expect(module.status).toBeOneOf([ModuleStatus.Created, ModuleStatus.Failed])
+        expect(module.status).not.toBe(ModuleStatus.Mounted)
     })
 })
 

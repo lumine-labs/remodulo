@@ -1,24 +1,24 @@
 import { describe, expect, it } from "vitest"
 
 import { Container, Scope, inject } from "@remodulo/container"
-import type { Constructor } from "@remodulo/container"
-import type { Provider } from "../../src/core/provider/provider.types.js"
+import type { Provider } from "../../src/core/provider.types.js"
 import { makeApp, tracked } from "../setup/helpers.js"
 
-// onResolution — the hook the module lifecycle is built on.
+// afterMaterialize — the hook the module lifecycle is built on.
 // ========================================
 //
-// It reports instances at construction time, on the container that owns the binding. Everything the
-// lifecycle knows about "what belongs to this module" comes from here.
+// It reports instances at construction time, on the container that owns the binding. Attachment is
+// container-global and takes no token, so a hook that cares about one binding says so in its first line.
+// Everything the lifecycle knows about "what belongs to this module" comes from here.
 
-describe("onResolution", () => {
+describe("afterMaterialize", () => {
     it("fires once per constructed singleton, however often it is resolved", () => {
         class Service {}
         const seen: unknown[] = []
 
         const container = new Container()
         container.register(Service)
-        container.onResolution(Service, (instance) => seen.push(instance))
+        container.on("afterMaterialize", ({ instance }) => seen.push(instance))
 
         const first = container.resolve(Service)
         container.resolve(Service)
@@ -34,7 +34,7 @@ describe("onResolution", () => {
 
         const container = new Container()
         container.register({ provide: TOKEN, useValue: value })
-        container.onResolution(TOKEN, (instance) => seen.push(instance))
+        container.on("afterMaterialize", ({ instance }) => seen.push(instance))
 
         container.resolve(TOKEN)
         container.resolve(TOKEN)
@@ -48,7 +48,7 @@ describe("onResolution", () => {
 
         const container = new Container()
         container.register({ provide: TOKEN, useFactory: () => ({ built: true }) })
-        container.onResolution(TOKEN, (instance) => seen.push(instance))
+        container.on("afterMaterialize", ({ instance }) => seen.push(instance))
 
         const resolved = container.resolve(TOKEN)
         container.resolve(TOKEN)
@@ -62,7 +62,7 @@ describe("onResolution", () => {
 
         const container = new Container()
         container.register(Service)
-        container.onResolution(Service, (instance) => seen.push(instance))
+        container.on("afterMaterialize", ({ instance }) => seen.push(instance))
 
         expect(seen).toEqual([])
     })
@@ -73,7 +73,7 @@ describe("onResolution", () => {
 
         const owner = new Container()
         owner.register(Service)
-        owner.onResolution(Service, () => seen.push("owner"))
+        owner.on("afterMaterialize", () => seen.push("owner"))
 
         const grandchild = owner.fork().fork()
         const resolved = grandchild.resolve(Service)
@@ -91,15 +91,14 @@ describe("onResolution", () => {
             readonly dependency = inject<unknown>(B)
         }
 
-        const order: string[] = []
+        const order: unknown[] = []
         const container = new Container()
         container.register([{ provide: B, useClass: Dependency }, Dependent])
-        container.onResolution(Dependent, () => order.push("Dependent"))
-        container.onResolution(B, () => order.push("Dependency"))
+        container.on("afterMaterialize", ({ snapshot }) => order.push(snapshot.token))
 
         container.resolve(Dependent)
 
-        expect(order).toEqual(["Dependency", "Dependent"])
+        expect(order).toEqual([B, Dependent])
     })
 
     it("fires per instance for a transient binding", () => {
@@ -109,7 +108,7 @@ describe("onResolution", () => {
 
         const container = new Container()
         container.register({ provide: TOKEN, useClass: Service, scope: Scope.Transient })
-        container.onResolution(TOKEN, (instance) => seen.push(instance))
+        container.on("afterMaterialize", ({ instance }) => seen.push(instance))
 
         const first = container.resolve(TOKEN)
         const second = container.resolve(TOKEN)
@@ -119,62 +118,68 @@ describe("onResolution", () => {
         expect(new Set(seen).size).toBe(3)
     })
 
-    it("fires the target's listener when an alias is resolved, and refuses to observe the alias", () => {
+    it("never fires for an alias, and fires for the target it redirects to", () => {
         class Service {}
         const ALIAS = Symbol("alias")
-        const seen: string[] = []
+        const seen: unknown[] = []
 
         const container = new Container()
         container.register([Service, { provide: ALIAS, useExisting: Service }])
-        container.onResolution(Service, () => seen.push("target"))
-
-        // An alias owns no binding and constructs nothing, so there is nothing to observe on it.
-        expect(() => container.onResolution(ALIAS, () => seen.push("alias"))).toThrowError(
-            /Cannot observe alias/
-        )
+        container.on("afterMaterialize", ({ snapshot }) => seen.push(snapshot.token))
 
         container.resolve(ALIAS)
 
-        expect(seen).toEqual(["target"])
+        // An alias owns no binding and constructs nothing, so the only materialization is the target's —
+        // which is why the lifecycle needs no alias guard on the payload it filters.
+        expect(seen).toEqual([Service])
     })
 
     it("reports the same instance the caller receives", () => {
         class Service {
             readonly id = "service"
         }
-        let reported: Service | undefined
+        let reported: unknown
 
         const container = new Container()
         container.register(Service)
-        container.onResolution<Service>(Service, (instance) => {
+        container.on("afterMaterialize", ({ instance }) => {
             reported = instance
         })
 
         expect(container.resolve(Service)).toBe(reported)
     })
 
-    it("refuses to observe a token the container does not own", () => {
+    it("stays silent on a container that only reaches the binding through the chain", () => {
         const TOKEN = Symbol("upward")
+        const parentValue = { from: "parent" }
+        const parentSeen: unknown[] = []
+        const childSeen: unknown[] = []
 
         const parent = new Container()
-        parent.register({ provide: TOKEN, useValue: { from: "parent" } })
-        const child = parent.fork()
+        parent.register({ provide: TOKEN, useValue: parentValue })
+        parent.on("afterMaterialize", ({ instance }) => parentSeen.push(instance))
 
-        // The child can resolve it through the chain but owns no binding for it, so it cannot observe it.
+        const child = parent.fork()
+        child.on("afterMaterialize", ({ instance }) => childSeen.push(instance))
+
+        // There is no attach-time refusal left to lean on — `on` takes no token, so there is no token for
+        // it to refuse over. The same guarantee arrives at the other end: the child owns no binding for
+        // TOKEN, so no construction of it is ever reported to the child.
         expect(child.resolve(TOKEN)).toEqual({ from: "parent" })
-        expect(() => child.onResolution(TOKEN, () => {})).toThrowError(/nothing is registered for it/)
+        expect(childSeen).toEqual([])
+        expect(parentSeen).toEqual([parentValue])
     })
 
     /**
-     * Listeners ride on the BINDING, not on the container. A descendant that shadows a token owns a
-     * different binding, so the ancestor's listener never fires for it: each container hears only about
-     * instances its own binding produced, whichever container the resolution was requested from.
+     * Materialization is reported by the OWNER. A descendant that shadows a token owns a different binding,
+     * so the ancestor's hook never fires for it: each container hears only about instances its own bindings
+     * produced, whichever container the resolution was requested from.
      *
-     * That is what makes shadowing safe for the lifecycle. A container-level listener would be inherited
-     * downward and matched by token, so a module shadowing an ancestor's token would get its instance
-     * adopted by the ancestor's lifecycle too — destroyed on the ancestor's schedule, not its own.
+     * That is what makes shadowing safe for the lifecycle. A hook matched by token across the chain would
+     * mean a module shadowing an ancestor's token got its instance adopted by the ancestor's lifecycle too
+     * — destroyed on the ancestor's schedule, not its own.
      */
-    it("does not fire an ancestor's listener for a shadowing binding resolved below it", () => {
+    it("does not fire an ancestor's hook for a shadowing binding resolved below it", () => {
         const TOKEN = Symbol("shadowed")
         const parentValue = { from: "parent" }
         const childValue = { from: "child" }
@@ -183,15 +188,15 @@ describe("onResolution", () => {
 
         const parent = new Container()
         parent.register({ provide: TOKEN, useValue: parentValue })
-        parent.onResolution(TOKEN, (instance) => parentSeen.push(instance))
+        parent.on("afterMaterialize", ({ instance }) => parentSeen.push(instance))
 
         const child = parent.fork()
         child.register({ provide: TOKEN, useValue: childValue })
-        child.onResolution(TOKEN, (instance) => childSeen.push(instance))
+        child.on("afterMaterialize", ({ instance }) => childSeen.push(instance))
 
         child.resolve(TOKEN)
 
-        // Listeners ride on the binding, so the ancestor never sees an instance it does not own.
+        // The report goes to the owner, so the ancestor never sees an instance it does not own.
         expect(childSeen).toEqual([childValue])
         expect(parentSeen).toEqual([])
 
@@ -205,15 +210,15 @@ describe("onResolution", () => {
 // ========================================
 //
 // Inversify's `onActivation` REPLACES a binding's handler rather than chaining it (measured in
-// scratch/probe-multiprovider-7-double-activation.ts). The container wraps that: one real handler per
-// binding, dispatching to a list of listeners. Everything below is that wrapper's contract.
+// scratch/probe-multiprovider-7-double-activation.ts). The container keeps one list per event and walks a
+// copy of it, so hooks accumulate. Everything below is that contract.
 
 describe("multicast", () => {
     it("lets user code observe a module-owned token WITHOUT unhooking the module's adoption", async () => {
-        // THE regression test. A module observes its own providers during init to adopt them. Before the
-        // wrapper, any later `onResolution` on one of those tokens replaced the module's listener and the
-        // service silently stopped receiving its lifecycle — a bug with no error and no failing assertion
-        // anywhere near the cause. If this test ever goes away, that trap comes back.
+        // THE regression test. A module arms one hook during init to adopt what its container builds.
+        // Before the list, any later observation on one of those tokens replaced the module's listener and
+        // the service silently stopped receiving its lifecycle — a bug with no error and no failing
+        // assertion anywhere near the cause. If this test ever goes away, that trap comes back.
         const log: string[] = []
         const Service = tracked(log, "S")
         const TOKEN = Symbol("module-owned")
@@ -221,22 +226,24 @@ describe("multicast", () => {
         const module = makeApp({ providers: [{ provide: TOKEN, useClass: Service, lazy: true } as Provider] })
         module.mount()
 
-        // User code, well after the module armed its own observation during init.
+        // User code, well after the module armed its own hook during init.
         const seen: unknown[] = []
-        module.container.onResolution(TOKEN, (instance) => seen.push(instance))
+        module.container.on("afterMaterialize", ({ snapshot, instance }) => {
+            if (snapshot.token === TOKEN) seen.push(instance)
+        })
 
         const instance = module.container.resolve(TOKEN)
 
-        // The user's listener fired...
+        // The user's hook fired...
         expect(seen).toEqual([instance])
 
-        // ...and the module still adopted it — init on arrival (mount has already gone past, per the
-        // late-adoption rule), then the rest of the lifecycle.
+        // ...and the module still adopted it — caught up through init and mount on arrival, then the rest
+        // of the lifecycle.
         module.unmount()
         await module.destroy()
 
-        expect(Service.counts).toEqual({ init: 1, mount: 0, unmount: 1, destroy: 1 })
-        expect(log).toEqual(["S:ctor", "S:init", "S:unmount", "S:destroy"])
+        expect(Service.counts).toEqual({ init: 1, mount: 1, unmount: 1, destroy: 1 })
+        expect(log).toEqual(["S:ctor", "S:init", "S:mount", "S:unmount", "S:destroy"])
     })
 
     it("survives the eager path too — observation added after a module already built its instance", async () => {
@@ -247,10 +254,12 @@ describe("multicast", () => {
         const module = makeApp({ providers: [{ provide: TOKEN, useClass: Service } as Provider] })
         module.mount()
 
-        // The instance already exists, so nothing fires for this listener — but attaching it must not
-        // disturb the adoption that already happened either.
+        // The instance already exists, so nothing fires for this hook — but attaching it must not disturb
+        // the adoption that already happened either.
         const seen: unknown[] = []
-        module.container.onResolution(TOKEN, (instance) => seen.push(instance))
+        module.container.on("afterMaterialize", ({ snapshot, instance }) => {
+            if (snapshot.token === TOKEN) seen.push(instance)
+        })
         module.container.resolve(TOKEN)
 
         expect(seen).toEqual([])
@@ -267,16 +276,16 @@ describe("multicast", () => {
 
         const container = new Container()
         container.register({ provide: TOKEN, useValue: "v" })
-        container.onResolution(TOKEN, () => order.push("first"))
-        container.onResolution(TOKEN, () => order.push("second"))
-        container.onResolution(TOKEN, () => order.push("third"))
+        container.on("afterMaterialize", () => order.push("first"))
+        container.on("afterMaterialize", () => order.push("second"))
+        container.on("afterMaterialize", () => order.push("third"))
 
         container.resolve(TOKEN)
 
         expect(order).toEqual(["first", "second", "third"])
     })
 
-    it("does not drag a listener attached mid-notification into the walk that is already running", () => {
+    it("does not drag a hook attached mid-notification into the walk that is already running", () => {
         const order: string[] = []
         const TOKEN = Symbol("reentrant")
 
@@ -284,9 +293,9 @@ describe("multicast", () => {
 
         const container = new Container()
         container.register({ provide: TOKEN, useClass: Service, scope: Scope.Transient })
-        container.onResolution(TOKEN, () => {
+        container.on("afterMaterialize", () => {
             order.push("first")
-            container.onResolution(TOKEN, () => order.push("late"))
+            container.on("afterMaterialize", () => order.push("late"))
         })
 
         container.resolve(TOKEN)

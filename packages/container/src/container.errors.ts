@@ -100,13 +100,6 @@ export function aliasTargetsMulti(alias: InjectionToken, target: InjectionToken)
     return `Provider for ${describeToken(alias)} cannot alias ${describeToken(target)}: ${describeToken(target)} is a multi-provider collection, and \`useExisting\` is a single-value read of its target — it redirects to exactly the read \`resolve\` performs, and \`resolve\` refuses a collection. Alias a single registration, or contribute to the collection with \`{ provide: ${describeToken(target)}, ..., multi: true }\`.`
 }
 
-// Observation Errors
-// ========================================
-
-export function notObservable(token: InjectionToken): string {
-    return `Cannot observe ${describeToken(token)}: nothing is registered for it on this container. Register the provider before calling onResolution.`
-}
-
 // Construction Errors
 // ========================================
 

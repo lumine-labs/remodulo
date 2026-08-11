@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, it } from "vitest"
 
 import { Container } from "@remodulo/container"
-import { App, Module } from "../../src/core/module/module.js"
-import { ModuleTraversal } from "../../src/core/providers/module-traversal/module-traversal.provider.js"
-import { makeApp, makeChild } from "../setup/helpers.js"
+import { App, Module } from "../../src/core/module.js"
+import { ModuleTraversal } from "../../src/core/module-traversal.js"
+import { makeApp, makeChild, refuses } from "../setup/helpers.js"
 
 // ModuleTraversal
 // ========================================
@@ -138,6 +138,7 @@ describe("ModuleTraversal — descendants", () => {
         makeChild(tree.b, { id: "unmounted" })
         expect(traversalOf(tree.root).descendants()).toEqual([tree.a, tree.a1, tree.a2, tree.b])
 
+        tree.a2.unmount()
         await tree.a2.destroy()
         expect(traversalOf(tree.root).descendants()).toEqual([tree.a, tree.a1, tree.b])
     })
@@ -246,6 +247,7 @@ describe("ModuleTraversal — a derived view, not a stored one", () => {
         expect(traversalOf(tree.root).descendants()).toEqual(new ModuleTraversal(tree.root).descendants())
         expect(traversalOf(tree.a).children()).toEqual([...tree.a.children])
 
+        tree.a2.unmount()
         await tree.a2.destroy()
 
         expect(traversalOf(tree.a).children()).toEqual([...tree.a.children])

@@ -1,16 +1,17 @@
 import { Scope, inject } from "@remodulo/container"
-import type { Provider } from "../../src/core/provider/provider.types.js"
-import type { Module } from "../../src/core/module/module.js"
-import { PropsRef } from "../../src/core/providers/props-ref/props-ref.provider.js"
+import type { Provider } from "../../src/core/provider.types.js"
+import type { Module } from "../../src/core/module.js"
+import { PropsRef } from "../../src/primitives/props-ref.js"
 import type { LeakTracker } from "./gc.js"
 
 // Fixtures
 // ========================================
 //
 // One provider set exercising every shape that participates in retention: an eagerly built singleton, a
-// lazy singleton (built only when somebody resolves it), an alias (no binding of its own, no listener), a
-// transient (never enters the lifecycle instance list) and a PropsRef registered by value the way
-// `usePropsRef` registers one. Payloads are large enough that a retained generation moves `heapUsed`.
+// lazy singleton (built only when somebody resolves it), an alias (no binding of its own, so it never
+// materializes), a transient (never enters the lifecycle instance list) and a PropsRef registered by
+// value the way `usePropsRef` registers one. Payloads are large enough that a retained generation moves
+// `heapUsed`.
 
 export const EAGER = Symbol("memory:eager")
 export const LAZY = Symbol("memory:lazy")

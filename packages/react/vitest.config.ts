@@ -5,6 +5,9 @@ export default defineConfig({
     test: {
         environment: "jsdom",
         globals: true,
+        // Every spy is undone between cells, so a forgotten `mockRestore` cannot leak a stubbed console
+        // into the next test and hide an error it should have reported.
+        restoreMocks: true,
         setupFiles: ["./tests/setup/setupTests.ts"],
         include: ["tests/**/*.test.ts", "tests/**/*.test.tsx"],
         // tests/memory needs --expose-gc and a single fork; it has its own config and `pnpm run test:memory`.

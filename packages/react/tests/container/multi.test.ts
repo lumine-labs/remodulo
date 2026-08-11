@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 
-import { Container, ResolveAllMode, Scope, inject, injectAll, injectOptional } from "@remodulo/container"
+import { Container, ResolveAllMode, Resolver, Scope, inject, injectAll, injectOptional } from "@remodulo/container"
 import type { Constructor } from "@remodulo/container"
 import type {
     ClassProvider,
@@ -8,9 +8,8 @@ import type {
     FactoryProvider,
     Provider,
     ValueProvider,
-} from "../../src/core/provider/provider.types.js"
-import { registerProviders } from "../../src/core/provider/provider.js"
-import { Resolver } from "../../src/core/providers/resolver/resolver.provider.js"
+} from "../../src/core/provider.types.js"
+import { registerProviders } from "../../src/core/provider.js"
 import { makeApp, makeChild } from "../setup/helpers.js"
 
 // Multi-providers.
@@ -344,37 +343,87 @@ describe("lazy uniformity", () => {
         expect(module.container.resolveAll(TOKEN)).toHaveLength(2)
     })
 
-    it("lets a value member into a lazy collection — it has no laziness to disagree about", () => {
-        // Structurally outside the rule, not exempted from it: a `useValue` is already an instance, so
-        // there is nothing for `lazy` to defer.
+    it("takes a value member in when it agrees", () => {
+        // A value builds nothing, but it is MATERIALIZED by the same eager `resolveAll` as its constructing
+        // siblings — so it is inside the rule, and it has to declare the same verdict they do.
         const module = makeApp({
             providers: [
                 { provide: TOKEN, useClass: Service, multi: true, lazy: true },
-                { provide: TOKEN, useValue: "ready", multi: true },
+                { provide: TOKEN, useValue: "ready", multi: true, lazy: true },
             ],
         })
 
         expect(module.container.resolveAll(TOKEN)).toHaveLength(2)
     })
 
-    it("lets an alias member into a lazy collection for the same reason", () => {
+    it("refuses a value member that does not", () => {
+        expect(() =>
+            makeApp({
+                providers: [
+                    { provide: TOKEN, useClass: Service, multi: true, lazy: true },
+                    { provide: TOKEN, useValue: "ready", multi: true },
+                ],
+            })
+        ).toThrow(
+            "Provider for PLUGINS declares `lazy: false` while the collection already registered for that token is `lazy: true`."
+        )
+    })
+
+    it("lets an alias member into a lazy collection — when it agrees, and refuses it when it does not", () => {
+        // FLIPPED: an alias member used to be exempt from the lazy ledger, on the theory that it binds
+        // nothing so it has no timing of its own. It does have one — `lazy` decides whether the owner
+        // RESOLVES THROUGH it at init, which is what pulls the target into existence. So it reconciles like
+        // every other member, and the remedy for the old spelling is to mark it lazy too.
         const module = makeApp({
             providers: [
                 Service,
                 { provide: TOKEN, useClass: Service, multi: true, lazy: true },
-                { provide: TOKEN, useExisting: Service, multi: true },
+                { provide: TOKEN, useExisting: Service, multi: true, lazy: true },
             ],
         })
 
         expect(module.container.resolveAll(TOKEN)).toHaveLength(2)
+
+        // And the disagreements it used to be waved through on, in both directions — an eager alias in a
+        // lazy collection, and a lazy alias in an eager one.
+        expect(() =>
+            makeApp({
+                providers: [
+                    Service,
+                    { provide: TOKEN, useClass: Service, multi: true, lazy: true },
+                    { provide: TOKEN, useExisting: Service, multi: true },
+                ],
+            })
+        ).toThrow("declares `lazy: false` while the collection already registered for that token is `lazy: true`.")
+
+        expect(() =>
+            makeApp({
+                providers: [
+                    Service,
+                    { provide: TOKEN, useClass: Service, multi: true },
+                    { provide: TOKEN, useExisting: Service, multi: true, lazy: true },
+                ],
+            })
+        ).toThrow("declares `lazy: true` while the collection already registered for that token is `lazy: false`.")
     })
 
-    it("lets a value member in first, before the collection is lazy at all", () => {
-        // Order must not matter: the value declares nothing, so it cannot set a verdict for the
-        // constructing members to be measured against.
+    it("reads a value member's verdict whichever end of the list it arrives at", () => {
+        // Order must not matter: the value SETS the verdict when it comes first, and is measured against
+        // it when it comes last. Either way the refusal is the same one.
+        expect(() =>
+            makeApp({
+                providers: [
+                    { provide: TOKEN, useValue: "ready", multi: true },
+                    { provide: TOKEN, useClass: Service, multi: true, lazy: true },
+                ],
+            })
+        ).toThrow(
+            "Provider for PLUGINS declares `lazy: true` while the collection already registered for that token is `lazy: false`."
+        )
+
         const module = makeApp({
             providers: [
-                { provide: TOKEN, useValue: "ready", multi: true },
+                { provide: TOKEN, useValue: "ready", multi: true, lazy: true },
                 { provide: TOKEN, useClass: Service, multi: true, lazy: true },
             ],
         })
@@ -441,7 +490,7 @@ describe("observation", () => {
         const container = new Container()
         container.register({ provide: TOKEN, useClass: A, multi: true })
         container.register({ provide: TOKEN, useClass: B, multi: true })
-        container.onResolution<A | B>(TOKEN, (instance) => seen.push(instance.name))
+        container.on("afterMaterialize", ({ instance }) => seen.push((instance as A | B).name))
 
         container.resolveAll(TOKEN)
         container.resolveAll(TOKEN)
@@ -449,18 +498,18 @@ describe("observation", () => {
         expect(seen).toEqual(["a", "b"])
     })
 
-    it("does not observe members registered after the call", () => {
+    it("observes members registered after the hook was attached", () => {
         const seen: string[] = []
         const container = new Container()
         container.register({ provide: TOKEN, useValue: "a", multi: true })
-        container.onResolution<string>(TOKEN, (instance) => seen.push(instance))
+        container.on("afterMaterialize", ({ instance }) => seen.push(instance as string))
         container.register({ provide: TOKEN, useValue: "b", multi: true })
 
         container.resolveAll(TOKEN)
 
-        // Documented, and harmless for ModuleLifecycle: a module registers every provider in its
-        // constructor and only observes during init.
-        expect(seen).toEqual(["a"])
+        // The reverse of what per-entry attachment did, and harmless for ModuleLifecycle either way: a
+        // module registers every provider in its constructor and arms its hook during init.
+        expect(seen).toEqual(["a", "b"])
     })
 
     it("reports an ancestor's members to the ancestor only", () => {
@@ -469,39 +518,47 @@ describe("observation", () => {
 
         const parent = new Container()
         parent.register({ provide: TOKEN, useValue: "parent", multi: true })
-        parent.onResolution<string>(TOKEN, (instance) => parentSeen.push(instance))
+        parent.on("afterMaterialize", ({ instance }) => parentSeen.push(instance as string))
 
         const child = parent.fork()
         child.register({ provide: TOKEN, useValue: "child", multi: true })
-        child.onResolution<string>(TOKEN, (instance) => childSeen.push(instance))
+        child.on("afterMaterialize", ({ instance }) => childSeen.push(instance as string))
 
         expect(child.resolveAll(TOKEN)).toEqual(["child", "parent"])
         expect(parentSeen).toEqual(["parent"])
         expect(childSeen).toEqual(["child"])
     })
 
-    it("still refuses a token with no bindings of its own", () => {
+    it("attaches to a token with no bindings of its own, and simply never fires", () => {
+        const seen: unknown[] = []
         const container = new Container()
 
-        expect(() => container.onResolution(TOKEN, () => undefined)).toThrow("Cannot observe PLUGINS")
+        // Nothing left to refuse: `on` takes no token, so a hook on a container that registered nothing is
+        // a hook that hears nothing.
+        expect(() => container.on("afterMaterialize", ({ instance }) => seen.push(instance))).not.toThrow()
+        expect(seen).toEqual([])
     })
 
-    it("refuses a collection made entirely of aliases", () => {
-        // Aliases carry no binding of their own: resolving one fires the TARGET's listener, on the
-        // container that registered the target. There is nothing here to attach to.
+    it("reports nothing of its own for a collection made entirely of aliases", () => {
+        // Aliases carry no binding of their own: resolving one materializes the TARGET, and it is the
+        // target's entry that gets reported. The collection's own token never appears.
         class Legacy {}
 
+        const seen: unknown[] = []
         const container = new Container()
         container.register(Legacy)
         container.register({ provide: TOKEN, useExisting: Legacy, multi: true })
+        container.on("afterMaterialize", ({ snapshot }) => seen.push(snapshot.token))
 
-        expect(() => container.onResolution(TOKEN, () => undefined)).toThrow("Cannot observe PLUGINS")
+        container.resolveAll(TOKEN)
+
+        expect(seen).toEqual([Legacy])
     })
 
-    // The kernel has one observation door, `onResolution`, and it hands the listener the snapshot of the
-    // entry that produced the value. Selecting by scope is therefore an `if` in the listener rather than a
+    // The kernel reports every construction through one event, and it hands the hook the snapshot of the
+    // entry that produced the value. Selecting by scope is therefore an `if` in the hook rather than a
     // predicate consulted at attach time — the mechanism the whole adoption contract rests on.
-    it("an in-listener singleton filter skips a transient member sharing the token", () => {
+    it("an in-hook singleton filter skips a transient member sharing the token", () => {
         // The standing invariant since 0.4.0: transients never participate in lifecycle. Filtering per
         // BINDING rather than per token is what keeps that true inside a collection.
         class Transient {
@@ -518,12 +575,12 @@ describe("observation", () => {
 
         const all: string[] = []
         const everything = mixed()
-        everything.onResolution<{ name: string }>(TOKEN, (instance) => all.push(instance.name))
+        everything.on("afterMaterialize", ({ instance }) => all.push((instance as { name: string }).name))
 
         const retained: string[] = []
         const singletons = mixed()
-        singletons.onResolution<{ name: string }>(TOKEN, (instance, entry) => {
-            if (entry.scope === Scope.Singleton) retained.push(instance.name)
+        singletons.on("afterMaterialize", ({ instance, snapshot }) => {
+            if (snapshot.scope === Scope.Singleton) retained.push((instance as { name: string }).name)
         })
 
         for (const container of [everything, singletons]) {
@@ -532,7 +589,7 @@ describe("observation", () => {
             container.resolveAll(TOKEN)
         }
 
-        // `onResolution` is unchanged and still reports every construction, transients included.
+        // The unfiltered hook reports every construction, transients included.
         expect(all).toEqual(["constant", "transient", "transient", "transient"])
         expect(retained).toEqual(["constant"])
     })
@@ -546,8 +603,8 @@ describe("observation", () => {
         container.register({ provide: TOKEN, useFactory: () => new Transient(), multi: true, scope: Scope.Transient })
 
         // Not an error: a token whose every binding is transient simply retains nothing.
-        container.onResolution(TOKEN, (instance, entry) => {
-            if (entry.scope === Scope.Singleton) seen.push(instance)
+        container.on("afterMaterialize", ({ instance, snapshot }) => {
+            if (snapshot.scope === Scope.Singleton) seen.push(instance)
         })
         container.resolveAll(TOKEN)
 
@@ -555,15 +612,15 @@ describe("observation", () => {
     })
 
     it("keeps every observer of a binding, notified in attach order", () => {
-        // The kernel keeps a listener LIST per entry and walks a copy of it, so observers accumulate
-        // rather than replacing one another — the failure mode inversify's `onActivation` had.
+        // The kernel keeps a hook LIST per event and walks a copy of it, so observers accumulate rather
+        // than replacing one another — the failure mode inversify's `onActivation` had.
         const order: string[] = []
 
         const container = new Container()
         container.register({ provide: TOKEN, useValue: "v", multi: true })
-        container.onResolution<string>(TOKEN, (instance) => order.push(`first:${instance}`))
-        container.onResolution<string>(TOKEN, (instance) => order.push(`second:${instance}`))
-        container.onResolution<string>(TOKEN, (instance) => order.push(`third:${instance}`))
+        container.on("afterMaterialize", ({ instance }) => order.push(`first:${instance as string}`))
+        container.on("afterMaterialize", ({ instance }) => order.push(`second:${instance as string}`))
+        container.on("afterMaterialize", ({ instance }) => order.push(`third:${instance as string}`))
 
         container.resolveAll(TOKEN)
 
@@ -575,9 +632,9 @@ describe("observation", () => {
 
         const container = new Container()
         container.register({ provide: TOKEN, useValue: "v", multi: true })
-        container.onResolution<string>(TOKEN, (instance) => seen.push(`all:${instance}`))
-        container.onResolution<string>(TOKEN, (instance, entry) => {
-            if (entry.scope === Scope.Singleton) seen.push(`retained:${instance}`)
+        container.on("afterMaterialize", ({ instance }) => seen.push(`all:${instance as string}`))
+        container.on("afterMaterialize", ({ instance, snapshot }) => {
+            if (snapshot.scope === Scope.Singleton) seen.push(`retained:${instance as string}`)
         })
 
         container.resolveAll(TOKEN)
@@ -594,8 +651,8 @@ describe("observation", () => {
 
         const container = new Container()
         container.register({ provide: TOKEN, useClass: Service, multi: true, scope: Scope.Transient })
-        container.onResolution(TOKEN, () => first.push(++built))
-        container.onResolution(TOKEN, () => second.push(built))
+        container.on("afterMaterialize", () => first.push(++built))
+        container.on("afterMaterialize", () => second.push(built))
 
         container.resolveAll(TOKEN)
         container.resolveAll(TOKEN)
@@ -610,14 +667,14 @@ describe("observation", () => {
         const container = new Container()
         container.register({ provide: TOKEN, useValue: original })
 
-        // The signature says `void`, and the dispatcher returns the original whatever a listener does.
-        container.onResolution(TOKEN, () => ({ name: "replaced" }) as never)
-        container.onResolution(TOKEN, () => undefined)
+        // The signature says `void`, and the dispatcher returns the original whatever a hook does.
+        container.on("afterMaterialize", () => ({ name: "replaced" }) as never)
+        container.on("afterMaterialize", () => undefined)
 
         expect(container.resolve(TOKEN)).toBe(original)
     })
 
-    it("attaches to the non-alias members of a mixed collection", () => {
+    it("reports the non-alias members of a mixed collection", () => {
         const seen: string[] = []
         class Legacy {
             readonly name = "legacy"
@@ -630,10 +687,13 @@ describe("observation", () => {
         container.register(Legacy)
         container.register({ provide: TOKEN, useClass: Direct, multi: true })
         container.register({ provide: TOKEN, useExisting: Legacy, multi: true })
-        container.onResolution<Direct>(TOKEN, (instance) => seen.push(instance.name))
+        container.on("afterMaterialize", ({ instance, snapshot }) => {
+            if (snapshot.token === TOKEN) seen.push((instance as Direct).name)
+        })
 
         container.resolveAll(TOKEN)
 
+        // The alias member contributes nothing under TOKEN — `Legacy` materializes under its own entry.
         expect(seen).toEqual(["direct"])
     })
 })
@@ -641,7 +701,7 @@ describe("observation", () => {
 describe("scopes inside a collection", () => {
     // Scope is per MEMBER, and there is no uniformity rule. There briefly was one: while adoption was
     // filtered per token, a transient sharing a token with a singleton got adopted and accumulated. Since
-    // adoption is filtered per NOTIFICATION — every `onResolution` callback gets the producing entry's
+    // adoption is filtered per NOTIFICATION — every `afterMaterialize` payload carries the producing entry's
     // snapshot — the shape it forbade no longer breaks anything, so the guard came out.
 
     class Service {}
@@ -775,7 +835,7 @@ describe("Resolver parity", () => {
         const leaf = root.fork()
         leaf.register({ provide: TOKEN, useValue: "leaf", multi: true })
 
-        return { resolver: new Resolver(leaf), bare: new Resolver(leaf.fork()), leaf }
+        return { resolver: Resolver.for(leaf), bare: Resolver.for(leaf.fork()), leaf }
     }
 
     it("collects the chain by default, exactly as the container does", () => {
@@ -813,7 +873,7 @@ describe("Resolver parity", () => {
         const root = new Container()
         root.register({ provide: SINGLE, useValue: "root" })
         const child = root.fork()
-        const resolver = new Resolver(child)
+        const resolver = Resolver.for(child)
 
         expect(resolver.resolve(SINGLE, "nearest")).toBe("root")
         expect(resolver.resolveOptional(SINGLE, "self")).toBeUndefined()
@@ -827,7 +887,7 @@ describe("Resolver parity", () => {
         const container = new Container()
         container.register({ provide: TOKEN, useValue: "only" })
 
-        expect(() => new Resolver(container).resolveAll(TOKEN)).toThrow("Use `resolve`")
+        expect(() => Resolver.for(container).resolveAll(TOKEN)).toThrow("Use `resolve`")
     })
 })
 
@@ -890,7 +950,7 @@ describe("injectAll parity", () => {
 
         expect(bare.resolve(Nearest).plugins).toEqual(["root"])
         expect(bare.resolveAll(TOKEN, "nearest")).toEqual(["root"])
-        expect(new Resolver(bare).resolveAll(TOKEN, "nearest")).toEqual(["root"])
+        expect(Resolver.for(bare).resolveAll(TOKEN, "nearest")).toEqual(["root"])
 
         // The mode the decorator could not have, now answering the same as every other surface.
         expect(bare.resolve(Self).plugins).toEqual([])
@@ -1091,23 +1151,23 @@ void injectArrayThroughTheDoor
 const parameterisedFactory: FactoryProvider<string> = { provide: TOKEN, useFactory: (received: string) => received }
 void parameterisedFactory
 
-// `lazy` is the one key react still adds, and only the forms that construct carry it: a value is already
-// an instance and an alias builds nothing. The union narrows on the implementation key before the
-// excess-property check runs, so the refusal survives the derivation in both spellings.
+// `lazy` is the one key react still adds, and ALL FOUR object forms carry it now. A value carries it
+// because materializing it is what adopts it; an alias carries it because `lazy` decides whether the owner
+// RESOLVES THROUGH it at init, and that ask is what pulls its target into existence — at whichever module
+// owns the target, which may not be this one.
 
-// @ts-expect-error a value provider is already an instance — there is nothing to defer.
 const lazyValue: ValueProvider<string> = { provide: TOKEN, useValue: "a", lazy: true }
 void lazyValue
 
-const lazyValueThroughTheDoor: Provider[] = [
-    // @ts-expect-error and the same through the union.
-    { provide: TOKEN, useValue: "a", lazy: true },
-]
+const lazyValueThroughTheDoor: Provider[] = [{ provide: TOKEN, useValue: "a", lazy: true }]
 void lazyValueThroughTheDoor
 
-// @ts-expect-error an alias builds nothing, so it has no eager pass to skip.
+// FLIPPED from a `@ts-expect-error`: the alias was the one form the key was refused on.
 const lazyExisting: ExistingProvider<string> = { provide: TOKEN, useExisting: OTHER, lazy: true }
 void lazyExisting
+
+const lazyExistingThroughTheDoor: Provider[] = [{ provide: TOKEN, useExisting: OTHER, lazy: true }]
+void lazyExistingThroughTheDoor
 
 // The limit these pins have, stated rather than assumed: excess-property checking only fires on a FRESH
 // object literal. A provider assembled into a variable first and annotated afterwards keeps the key, and

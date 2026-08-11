@@ -1,12 +1,11 @@
 import { describe, expect, it } from "vitest"
 
-import { Container } from "@remodulo/container"
-import { App, Module } from "../../src/core/module/module.js"
-import { ModuleLifecycle } from "../../src/core/providers/module-lifecycle/module-lifecycle.provider.js"
-import { LIFECYCLE } from "../../src/core/providers/module-lifecycle/module-lifecycle.token.js"
-import { ModuleTraversal } from "../../src/core/providers/module-traversal/module-traversal.provider.js"
-import { Resolver } from "../../src/core/providers/resolver/resolver.provider.js"
-import { makeApp, makeChild, phase, plain, tracked } from "../setup/helpers.js"
+import { Container, Resolver, inject, injectResolver } from "@remodulo/container"
+import { App, Module } from "../../src/core/module.js"
+import { ModuleLifecycle } from "../../src/core/module-lifecycle.js"
+import { ModuleStatus } from "../../src/core/module-lifecycle.types.js"
+import { ModuleTraversal } from "../../src/core/module-traversal.js"
+import { makeApp, makeChild, phase, plain, refuses, tracked } from "../setup/helpers.js"
 
 // The Module / App classes.
 // ========================================
@@ -22,6 +21,7 @@ describe("construction", () => {
     it("builds a fresh container for an App and forks the parent's for a child", () => {
         const app = makeApp({ providers: [{ provide: PARENT_ONLY, useValue: "parent" }] })
         const child = new Module(app, { providers: [{ provide: CHILD_ONLY, useValue: "child" }] })
+        child.init()
 
         expect(app.container).toBeInstanceOf(Container)
         expect(child.container).toBeInstanceOf(Container)
@@ -33,28 +33,35 @@ describe("construction", () => {
         expect(app.container.isRegistered(CHILD_ONLY)).toBe(false)
     })
 
-    it("registers the four system providers on its own container", () => {
+    it("registers the three system providers on its own container", () => {
         const module = new App()
         const own = (token: Parameters<Container["isRegistered"]>[0]) => module.container.isRegistered(token, "self")
 
-        expect([own(Module), own(Resolver), own(ModuleTraversal), own(LIFECYCLE)]).toEqual([true, true, true, true])
+        // THREE, not four. The lifecycle was the fourth until it stopped being a registration and became a
+        // part of the Module — `module.lifecycle`, reached directly. It has no token left to register under.
+        expect([own(Module), own(Resolver), own(ModuleTraversal)]).toEqual([true, true, true])
     })
 
     it("registers the very lifecycle that drives the module's phases, not a second one", () => {
         const module = makeApp()
-        const lifecycle = module.container.resolve(LIFECYCLE)
+        const lifecycle = module.lifecycle
 
+        // The lifecycle's own surface is the status, and `Module.status` is the one read that forwards it.
         expect(lifecycle).toBeInstanceOf(ModuleLifecycle)
-        expect(lifecycle.initialized).toBe(true)
+        expect(lifecycle.status).toBe(ModuleStatus.Initialized)
 
         module.mount()
-        expect(lifecycle.mounted).toBe(true)
+        expect(lifecycle.status).toBe(ModuleStatus.Mounted)
     })
 
     // Hooks are handed to the lifecycle at ITS construction, not at `init()`. So the lifecycle is fully
-    // armed the moment it exists, and driving the phases through the registered instance — bypassing
-    // `Module.init()`, which is now nothing but a delegating phase transition — fires them all the same.
-    // Under the old `init(hooks?)` plumbing this drive lost every module hook: no argument, no hooks.
+    // armed the moment it exists, and driving the phases through the registered instance — rather than
+    // through `Module`'s delegating transitions — fires them all the same. Under the old `init(hooks?)`
+    // plumbing this drive lost every module hook: no argument, no hooks.
+    //
+    // `init()` is the one phase that cannot be driven that way any more, and not for a reason about hooks:
+    // the lifecycle sits behind a token like everything else, and the resolution gate refuses a read from a
+    // module that has not been armed. So the module arms itself, and the other three go through the token.
     it("carries the params' module hooks from construction, even when the phases are driven through it", async () => {
         const log: string[] = []
         const module = new App({
@@ -64,9 +71,9 @@ describe("construction", () => {
             onModuleUnmount: () => log.push("module:unmount"),
             onModuleDestroy: () => log.push("module:destroy"),
         })
-        const lifecycle = module.container.resolve(LIFECYCLE)
+        module.init()
+        const lifecycle = module.lifecycle
 
-        lifecycle.init()
         lifecycle.mount()
         lifecycle.unmount()
         await lifecycle.destroy()
@@ -84,16 +91,31 @@ describe("construction", () => {
     })
 
     it("registers itself under the Module token, resolvable directly and through the Resolver", () => {
-        const module = new App({ id: "wired" })
+        const module = makeApp({ id: "wired" })
 
         expect(module.container.resolve(Module)).toBe(module)
         expect(module.container.resolve(Resolver).resolve(Module)).toBe(module)
         expect(module.container.resolve(ModuleTraversal)).toBeInstanceOf(ModuleTraversal)
     })
 
+    it("registers the CANONICAL resolver, so the token and the ambient reader are one instance", () => {
+        const Reader = class {
+            readonly injected = inject(Resolver)
+            readonly ambient = injectResolver()
+        }
+
+        const module = makeApp({ providers: [Reader as never] })
+        const reader = module.container.resolve(Reader)
+
+        // The registration is `Resolver.for(container)`, not a private `new Resolver(container)`, so the
+        // two doors into the same container cannot hand out two views of it.
+        expect(reader.injected).toBe(Resolver.for(module.container))
+        expect(reader.ambient).toBe(reader.injected)
+    })
+
     it("registers user providers alongside the system ones", () => {
         const Plain = plain("wired")
-        const module = new App({ providers: [Plain, { provide: CHILD_ONLY, useValue: 7 }] })
+        const module = makeApp({ providers: [Plain, { provide: CHILD_ONLY, useValue: 7 }] })
 
         expect(module.container.isRegistered(Plain as never, "self")).toBe(true)
         expect(module.container.resolve(CHILD_ONLY)).toBe(7)
@@ -104,11 +126,11 @@ describe("construction", () => {
         const module = new App({ providers: [tracked(log, "A")] })
 
         expect(log).toEqual([])
-        expect(module.initialized).toBe(false)
+        expect(module.status).toBe(ModuleStatus.Created)
 
         module.init()
         expect(log).toEqual(["A:ctor", "A:init"])
-        expect(module.initialized).toBe(true)
+        expect(module.status).toBe(ModuleStatus.Initialized)
     })
 
     it("throws when a child is built from an un-initialized parent", () => {
@@ -124,17 +146,9 @@ describe("construction", () => {
 })
 
 describe("init", () => {
-    it("is idempotent — a second init runs nothing again", () => {
-        const log: string[] = []
-        const service = tracked(log, "A")
-        const module = new App({ providers: [service], onModuleInit: () => log.push("module:init") })
-
-        module.init()
-        module.init()
-
-        expect(service.counts.init).toBe(1)
-        expect(log).toEqual(["A:ctor", "module:init", "A:init"])
-    })
+    // A second init() is refused, and nothing re-fires behind the refusal — pinned once, in
+    // `idempotence.test.ts`, which is the file that owns signal discipline. It used to be pinned here too,
+    // verbatim, which meant two cells to update for one ruling and no reason to prefer either.
 
     it("runs providers in declaration order, module hook first", () => {
         const log: string[] = []
@@ -183,43 +197,75 @@ describe("children", () => {
     })
 })
 
-describe("state getters", () => {
-    it("tracks initialized and mounted across the phases", async () => {
+// `status` is the single read of a module's state. The four derived booleans that used to sit beside it —
+// `initialized`, `mounted`, `destroyed`, `claimed` — are gone, not hidden: a second view of one value is a
+// second thing that has to be kept true. Checked by `typecheck:tests`, and again against the published
+// declarations in the consumer fixtures. Nothing here is ever called.
+function statusIsTheOnlyStateRead(module: Module): void {
+    // @ts-expect-error `initialized` is gone — `status` is neither `created` nor `failed`.
+    void module.initialized
+    // @ts-expect-error `mounted` is gone — `status === ModuleStatus.Mounted`.
+    void module.mounted
+    // @ts-expect-error `destroyed` is gone — `status === ModuleStatus.Destroyed`.
+    void module.destroyed
+    // @ts-expect-error `claimed` is gone — `status` is `destroying` or `destroyed`.
+    void module.claimed
+}
+void statusIsTheOnlyStateRead
+
+describe("status", () => {
+    it("is the only state read on a module — the derived booleans are gone at runtime too", () => {
         const module = makeApp()
 
-        expect(module.initialized).toBe(true)
-        expect(module.mounted).toBe(false)
+        // `in` walks the prototype chain, so this catches a getter re-added on the class as readily as an
+        // own property. The type-level half is `statusIsTheOnlyStateRead` above.
+        for (const name of ["initialized", "mounted", "destroyed", "claimed"]) {
+            expect(name in module, `Module still exposes \`${name}\``).toBe(false)
+        }
 
-        module.mount()
-        expect(module.mounted).toBe(true)
-
-        module.unmount()
-        expect(module.mounted).toBe(false)
-
-        await module.destroy()
-        expect(module.mounted).toBe(false)
+        expect("status" in module).toBe(true)
+        expect(module.status).toBe(ModuleStatus.Initialized)
     })
 
-    // `destroyed` is the public end-state read; `claimed` is the mid-destroy bookkeeping behind it and is
-    // now `@internal`. The two differ only inside `destroy()`, which is why the flag flips before the await.
-    it("reports destroyed only once destroy has resolved", async () => {
+    it("reports each of the four phases by name across the whole drive", async () => {
         const module = makeApp()
 
-        expect(module.destroyed).toBe(false)
+        // Each phase asserted as the status it LANDS on, not merely as "no longer the last one" — the
+        // negative form passed for `unmounted` and `destroyed` alike and so pinned neither.
+        expect(module.status).toBe(ModuleStatus.Initialized)
+
+        module.mount()
+        expect(module.status).toBe(ModuleStatus.Mounted)
+
+        module.unmount()
+        expect(module.status).toBe(ModuleStatus.Unmounted)
+
+        await module.destroy()
+        expect(module.status).toBe(ModuleStatus.Destroyed)
+    })
+
+    // `destroyed` is the end state; `destroying` is the mid-destroy bookkeeping ahead of it. The two differ
+    // only inside `destroy()`, which is why the status moves before the await.
+    it("reads destroyed only once destroy has resolved", async () => {
+        const module = makeApp()
+
+        expect(module.status).not.toBe(ModuleStatus.Destroyed)
 
         const destroying = module.destroy()
         await destroying
 
-        expect(module.destroyed).toBe(true)
+        expect(module.status).toBe(ModuleStatus.Destroyed)
     })
 
-    it("stays destroyed across a repeated destroy", async () => {
+    it("stays destroyed, and collapses a repeated destroy", async () => {
         const module = makeApp()
 
+        // destroy() is the one signal a corpse answers rather than refusing: the claim walk finds nothing
+        // left to claim and the call falls straight through.
         await module.destroy()
-        await module.destroy()
+        await expect(module.destroy()).resolves.toBeUndefined()
 
-        expect(module.destroyed).toBe(true)
+        expect(module.status).toBe(ModuleStatus.Destroyed)
     })
 
     // Children link into the tree at mount, so the whole tree is mounted before the destroy — an
@@ -235,10 +281,13 @@ describe("state getters", () => {
         kept.mount()
         root.mount()
 
+        // destroy() takes `unmounted`, not `mounted`, so the doomed branch retires itself first. The unmount
+        // cascade runs downward only, so `root` and `kept` are untouched by it.
+        doomed.unmount()
         await doomed.destroy()
 
-        expect([doomed.destroyed, grandchild.destroyed]).toEqual([true, true])
-        expect([root.destroyed, kept.destroyed]).toEqual([false, false])
+        expect([doomed.status, grandchild.status]).toEqual([ModuleStatus.Destroyed, ModuleStatus.Destroyed])
+        expect([root.status, kept.status]).not.toContain(ModuleStatus.Destroyed)
     })
 })
 

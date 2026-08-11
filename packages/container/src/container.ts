@@ -4,12 +4,14 @@ import {
     Scope,
     type BindingEntrySnapshot,
     type Constructor,
+    type ContainerEvent,
+    type ContainerEventListener,
     type Entry,
-    type EntryListener,
     type EntrySnapshot,
     type EntrySource,
     type Found,
     type InjectionToken,
+    type Landing,
     type RegistrationMode,
     type Resolution,
     type ResolveAllMode,
@@ -38,13 +40,15 @@ import {
     modeConflict,
     multiNeedsProvide,
     multiRegistered,
-    notObservable,
     notRegistered,
     providerToken,
     singleRegistration,
 } from "./container.errors.js"
 import type { Frame } from "./frame.types.js"
 import { activeFrame, runInFrame } from "./frame.js"
+
+// A miss the read was spelled to tolerate. Distinct from `undefined`, which is a value a token may hold.
+const MISS = Symbol("miss")
 
 // Container
 // ========================================
@@ -62,9 +66,19 @@ export class Container {
     // Alias target -> its aliases, so a token turning multi fails whichever order the two arrived in.
     readonly #aliasTargets = new Map<InjectionToken, InjectionToken[]>()
 
+    readonly #hooks: { [E in ContainerEvent]: ContainerEventListener<E>[] } = {
+        beforeResolution: [],
+        afterResolution: [],
+        beforeMaterialize: [],
+        afterMaterialize: [],
+    }
+
     constructor(parent?: Container) {
         this.#parent = parent ?? null
     }
+
+    // Hierarchy
+    // ========================================
 
     fork(): Container {
         return new Container(this)
@@ -74,7 +88,7 @@ export class Container {
         return this.#parent
     }
 
-    // Registration
+    // Registry
     // ========================================
 
     register(provider: Provider | Provider[]): void {
@@ -178,57 +192,6 @@ export class Container {
         return mode === "self" ? this.#owns(token) : this.#findSingle(token, "nearest") !== undefined
     }
 
-    // Resolution
-    // ========================================
-
-    resolve<T>(token: InjectionToken<T>, mode: ResolveMode = "nearest"): T {
-        return this.#readSingle(token, mode, this.#context(), true) as T
-    }
-
-    resolveOptional<T>(token: InjectionToken<T>, mode: ResolveMode = "nearest"): T | undefined {
-        return this.#readSingle(token, mode, this.#context(), false) as T | undefined
-    }
-
-    resolveOr<T, F>(token: InjectionToken<T>, fallback: () => F, mode?: ResolveMode): T | F
-    resolveOr<T, F>(token: InjectionToken<T>, fallback: F, mode?: ResolveMode): T | F
-    resolveOr<T, F>(token: InjectionToken<T>, fallback: F | (() => F), mode: ResolveMode = "nearest"): T | F {
-        this.#assertSingleValued(token, mode)
-
-        const found = this.#findSingle(token, mode)
-        if (found) return found.owner.#materialize(found.entry, this.#context()) as T
-
-        return typeof fallback === "function" ? (fallback as () => F)() : fallback
-    }
-
-    resolveAll<T>(token: InjectionToken<T>, mode: ResolveAllMode = "chained"): T[] {
-        if (this.#modeOf(token) === "single") {
-            throw new ResolutionError(singleRegistration(token), token, mode)
-        }
-
-        const context = this.#context()
-        const all: unknown[] = []
-
-        for (const owner of this.#contributors(token, mode)) {
-            for (const entry of owner.#entries.get(token) ?? []) {
-                all.push(owner.#materialize(entry, context))
-            }
-        }
-
-        return all as T[]
-    }
-
-    /** Build `cls` in this container's context without registering it or anything it reaches. */
-    construct<T>(cls: Constructor<T>): T {
-        const context = this.#context()
-        this.#assertAcyclic(cls, context)
-
-        const frame: Frame = { container: this, request: context.request, chain: [...context.chain, cls] }
-        return runInFrame(frame, () => new cls())
-    }
-
-    // Public lookups
-    // ========================================
-
     registrations(): readonly EntrySnapshot[] {
         return this.#order.map(snapshot)
     }
@@ -245,25 +208,66 @@ export class Container {
         return entries.map(snapshot)
     }
 
+    // Resolvers
+    // ========================================
+
+    resolve<T>(token: InjectionToken<T>, mode: ResolveMode = "nearest"): T {
+        return this.#readSingle(token, mode, true) as T
+    }
+
+    resolveOptional<T>(token: InjectionToken<T>, mode: ResolveMode = "nearest"): T | undefined {
+        const value = this.#readSingle(token, mode, false)
+        return value === MISS ? undefined : (value as T)
+    }
+
+    resolveOr<T, F>(token: InjectionToken<T>, fallback: () => F, mode?: ResolveMode): T | F
+    resolveOr<T, F>(token: InjectionToken<T>, fallback: F, mode?: ResolveMode): T | F
+    resolveOr<T, F>(token: InjectionToken<T>, fallback: F | (() => F), mode: ResolveMode = "nearest"): T | F {
+        return this.#readWithFallback(token, mode, fallback) as T | F
+    }
+
+    resolveAll<T>(token: InjectionToken<T>, mode: ResolveAllMode = "chained"): T[] {
+        return this.#readMulti(token, mode) as T[]
+    }
+
+    /** Build `cls` in this container's context without registering it or anything it reaches. */
+    construct<T>(cls: Constructor<T>): T {
+        const context = this.#context()
+        this.#assertAcyclic(cls, context)
+
+        const frame: Frame = { container: this, request: context.request, chain: [...context.chain, cls] }
+        return runInFrame(frame, () => new cls())
+    }
+
     // Observation
     // ========================================
 
     /**
-     * Observe every instance this container builds for the token. One attach per member of a collection,
-     * and every notification carries the snapshot of the entry that produced the value.
+     * Attach a hook to one of this container's four events, and get back the disposer that detaches it.
+     * Hooks observe or refuse; nothing a hook returns reaches the caller.
+     *
+     * Registration is CONTAINER-GLOBAL and takes no token: a hook fires for every entry a read on this
+     * container LANDS on and for every construction on it, whoever made it, and it filters for itself. A
+     * read that lands nothing reaches no hook — whether the kernel refused it or it simply missed. The
+     * consequence worth stating before you attach one: a `before*` hook that throws refuses the operation
+     * for every caller on this container, not only for the code that attached the hook. Hooks are
+     * per-container — a fork inherits none — and they live until disposed or until the container dies.
      */
-    onResolution<T>(token: InjectionToken<T>, onResolved: (value: T, snapshot: BindingEntrySnapshot<T>) => void): void {
-        // An alias owns no binding and constructs nothing, so it is nothing to attach to.
-        const bindings = (this.#entries.get(token) ?? []).filter((entry) => entry.source.kind !== "alias")
-        if (bindings.length === 0) throw new ResolutionError(notObservable(token), token)
+    on<E extends ContainerEvent>(event: E, listener: ContainerEventListener<E>): () => void {
+        const listeners = this.#hooks[event]
+        listeners.push(listener)
 
-        for (const entry of bindings) {
-            if (entry.listeners) entry.listeners.push(onResolved as EntryListener)
-            else entry.listeners = [onResolved as EntryListener]
+        let disposed = false
+        return () => {
+            if (disposed) return
+            disposed = true
+
+            const index = listeners.indexOf(listener)
+            if (index !== -1) listeners.splice(index, 1)
         }
     }
 
-    // Reads
+    // Resolver internals
     // ========================================
 
     /** Everything one read shares with the graph below it: the ambient frame's, or a fresh graph. */
@@ -272,21 +276,65 @@ export class Container {
         return frame ? { request: frame.request, chain: frame.chain } : { request: new Map(), chain: [] }
     }
 
-    #readSingle(token: InjectionToken, mode: ResolveMode, context: Resolution, required: boolean): unknown {
+    /** One single-value read. Answers `MISS` where the caller's spelling tolerates finding nothing. */
+    #readSingle(token: InjectionToken, mode: ResolveMode, required: boolean): unknown {
         this.#assertSingleValued(token, mode)
 
+        const context = this.#context()
         const found = this.#findSingle(token, mode)
-        if (!found) {
+        const landing = found && this.#findLanding(found, context, required)
+
+        if (found === undefined || landing === undefined) {
             if (required) throw new ResolutionError(notRegistered(token, mode), token, mode)
-            return undefined
+
+            // Nothing landed, so there was no resolution to report. What the caller makes of the miss —
+            // `undefined`, a fallback — is the caller's business rather than an event.
+            return MISS
         }
 
-        return found.owner.#materialize(found.entry, context)
+        return this.#readEntry(token, mode, found.entry, landing)
     }
 
-    #owns(token: InjectionToken): boolean {
-        const entries = this.#entries.get(token)
-        return entries !== undefined && entries.length > 0
+    /** The fallback answers a tolerated MISS, never a registered `undefined` — that one is a value. */
+    #readWithFallback<F>(token: InjectionToken, mode: ResolveMode, fallback: F | (() => F)): unknown {
+        const value = this.#readSingle(token, mode, false)
+        if (value !== MISS) return value
+        return typeof fallback === "function" ? (fallback as () => F)() : fallback
+    }
+
+    /** One collection read: a pair per member it lands, in the order the members contribute. */
+    #readMulti(token: InjectionToken, mode: ResolveAllMode): unknown[] {
+        if (this.#modeOf(token) === "single") {
+            throw new ResolutionError(singleRegistration(token), token, mode)
+        }
+
+        const context = this.#context()
+        const all: unknown[] = []
+
+        for (const owner of this.#contributors(token, mode)) {
+            for (const entry of owner.#entries.get(token) ?? []) {
+                const landing = owner.#findLanding({ owner, entry }, context, true)
+
+                // The member as it sits in the collection, which for an alias member is the alias.
+                this.#notifyBeforeResolution(token, mode, entry)
+                const instance = landing.owner.#materialize(landing.entry, landing.context)
+                this.#notifyAfterResolution(entry, mode, instance)
+                all.push(instance)
+            }
+        }
+
+        return all
+    }
+
+    /**
+     * One read of an entry already found: announced at the container the read was made on, carrying the
+     * entry it was SPELLED through, and materialized from the binding that entry lands on.
+     */
+    #readEntry(token: InjectionToken, mode: ResolveMode, entry: Entry, landing: Landing): unknown {
+        this.#notifyBeforeResolution(token, mode, entry)
+        const instance = landing.owner.#materialize(landing.entry, landing.context)
+        this.#notifyAfterResolution(entry, mode, instance)
+        return instance
     }
 
     /** The nearest own entry at or above this container, or this container's own under `self`. */
@@ -299,6 +347,33 @@ export class Container {
             current = current.#parent
         }
         return undefined
+    }
+
+    /**
+     * Follow an alias to the binding it lands on, each hop anchored at the container that declared it so
+     * shadowing reads the same as it always did.
+     */
+    #findLanding(found: Found, context: Resolution, required: true): Landing
+    #findLanding(found: Found, context: Resolution, required: boolean): Landing | undefined
+    #findLanding(found: Found, context: Resolution, required: boolean): Landing | undefined {
+        let current = found
+        let reached = context
+
+        while (current.entry.source.kind === "alias") {
+            this.#assertAcyclic(current.entry.token, reached)
+
+            const { target } = current.entry.source
+            reached = { request: reached.request, chain: [...reached.chain, current.entry.token] }
+
+            const next: Found | undefined = current.owner.#findSingle(target, "nearest")
+            if (next === undefined) {
+                if (required) throw new ResolutionError(notRegistered(target, "nearest"), target, "nearest")
+                return undefined
+            }
+            current = next
+        }
+
+        return { owner: current.owner, entry: current.entry, context: reached }
     }
 
     /** The containers a collection read accumulates from, nearest first. */
@@ -319,25 +394,20 @@ export class Container {
         return contributors
     }
 
-    // Construction
-    // ========================================
-
     #materialize(entry: Entry, context: Resolution): unknown {
-        if (entry.source.kind === "alias") {
-            return this.#readSingle(entry.source.target, "nearest", context, true)
-        }
-
         if (entry.cache) return entry.cache.value
         if (entry.scope === Scope.Request && context.request.has(entry)) return context.request.get(entry)
 
         if (entry.source.kind === "value") {
             const { value } = entry.source
+            this.#notifyBeforeMaterialize(entry)
             entry.cache = { value }
-            this.#notify(entry, value)
+            this.#notifyAfterMaterialize(entry, value)
             return value
         }
 
         this.#assertAcyclic(entry.token, context)
+        this.#notifyBeforeMaterialize(entry)
 
         // Run the build inside the entry's own frame, so `inject()` anywhere below sees this container.
         const frame: Frame = {
@@ -350,7 +420,7 @@ export class Container {
         if (entry.scope === Scope.Singleton) entry.cache = { value: instance }
         else if (entry.scope === Scope.Request) context.request.set(entry, instance)
 
-        this.#notify(entry, instance)
+        this.#notifyAfterMaterialize(entry, instance)
         return instance
     }
 
@@ -360,15 +430,48 @@ export class Container {
         throw new RegistrationError(invalidProvider(entry.token), entry.token)
     }
 
-    /** Copied list: a listener attached mid-notification joins for the next construction, not this walk. */
-    #notify(entry: Entry, instance: unknown): void {
-        if (!entry.listeners) return
-        const view = snapshot(entry) as BindingEntrySnapshot
-        for (const notify of [...entry.listeners]) notify(instance, view)
+    // Notification
+    // ========================================
+
+    #notifyBeforeResolution(token: InjectionToken, mode: ResolveMode | ResolveAllMode, entry: Entry): void {
+        const listeners = this.#hooks.beforeResolution
+        if (listeners.length === 0) return
+
+        const event = { token, mode, snapshot: snapshot(entry) }
+        for (const notify of [...listeners]) notify(event)
     }
 
-    // Claim
+    #notifyAfterResolution(entry: Entry, mode: ResolveMode | ResolveAllMode, instance: unknown): void {
+        const listeners = this.#hooks.afterResolution
+        if (listeners.length === 0) return
+
+        const event = { instance, mode, snapshot: snapshot(entry) }
+        for (const notify of [...listeners]) notify(event)
+    }
+
+    #notifyBeforeMaterialize(entry: Entry): void {
+        const listeners = this.#hooks.beforeMaterialize
+        if (listeners.length === 0) return
+
+        const event = { token: entry.token, snapshot: snapshot(entry) as BindingEntrySnapshot }
+        for (const notify of [...listeners]) notify(event)
+    }
+
+    #notifyAfterMaterialize(entry: Entry, instance: unknown): void {
+        const listeners = this.#hooks.afterMaterialize
+        if (listeners.length === 0) return
+
+        const event = { instance, snapshot: snapshot(entry) as BindingEntrySnapshot }
+        for (const notify of [...listeners]) notify(event)
+    }
+
+    // Registry internals
     // ========================================
+
+    #owns(token: InjectionToken): boolean {
+        const entries = this.#entries.get(token)
+        return entries !== undefined && entries.length > 0
+    }
 
     /** Settle a registration's mode against everything already registered for the token. */
     #claim(token: InjectionToken, multi: boolean): void {
@@ -398,15 +501,6 @@ export class Container {
         this.#modes.set(token, mode)
     }
 
-    // Indexes
-    // ========================================
-
-    #rememberAlias(target: InjectionToken, alias: InjectionToken): void {
-        const aliases = this.#aliasTargets.get(target)
-        if (aliases) aliases.push(alias)
-        else this.#aliasTargets.set(target, [alias])
-    }
-
     /** Registration order is the order a collection resolves in. */
     #record(token: InjectionToken, source: EntrySource, scope: Scope, multi: boolean, metadata?: EntryMetadata): void {
         const entry: Entry =
@@ -417,6 +511,12 @@ export class Container {
         else this.#entries.set(token, [entry])
 
         this.#order.push(entry)
+    }
+
+    #rememberAlias(target: InjectionToken, alias: InjectionToken): void {
+        const aliases = this.#aliasTargets.get(target)
+        if (aliases) aliases.push(alias)
+        else this.#aliasTargets.set(target, [alias])
     }
 
     /** Nearest declared mode at or above this container, or undefined when nothing declares the token. */
@@ -464,7 +564,7 @@ export class Container {
     }
 }
 
-// Helpers
+// Snapshots
 // ========================================
 
 function sealMetadata(metadata: EntryMetadata | undefined): EntryMetadata | undefined {

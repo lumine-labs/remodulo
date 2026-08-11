@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest"
 
 import { Container } from "@remodulo/container"
-import { App, Module } from "../../src/core/module/module.js"
-import type { ModuleParams } from "../../src/core/module/module.js"
-import { ModuleProvider } from "../../src/react/providers/ModuleProvider.js"
+import { App, Module } from "../../src/core/module.js"
+import type { ModuleParams } from "../../src/core/module.types.js"
+import { ModuleProvider } from "../../src/react/ModuleProvider.js"
 
 // One container = one module.
 // ========================================

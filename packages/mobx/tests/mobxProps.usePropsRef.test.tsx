@@ -20,10 +20,8 @@ class Tracker {
 const adapter = mobxProps<Coords>()
 
 const TrackerModule = createModuleComponent<Coords>(
-    {
-        providers: [{ provide: Tracker, useFactory: () => new Tracker(inject<PropsRef<Coords>>(PropsRef)) }],
-    },
-    { propsAdapter: adapter }
+    { providers: [{ provide: Tracker, useFactory: () => new Tracker(inject<PropsRef<Coords>>(PropsRef)) }] },
+    { adapter }
 )
 
 let capturedTracker: Tracker | null = null

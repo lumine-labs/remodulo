@@ -61,6 +61,8 @@ export function makeInheritedAutoObservable<T extends object, AdditionalKeys ext
         while (current && current !== objectPrototype) {
             Reflect.ownKeys(current).forEach((key) => {
                 if (key === $mobx || key === "constructor") return
+                const sealed = Object.getOwnPropertyDescriptor(target, key)
+                if (sealed?.configurable === false) return
                 collected[key] = !declared ? true : key in declared ? declared[key] : true
             })
             current = Object.getPrototypeOf(current)

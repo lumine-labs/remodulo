@@ -1,16 +1,17 @@
 import { act, render, screen } from "@testing-library/react"
 import { beforeEach, describe, expect, it, vi } from "vitest"
-import { useState } from "react"
+import { createContext, useContext, useState } from "react"
 
-import { createModuleComponent } from "../../src/react/factories/createModuleComponent.js"
-import { ModuleProvider } from "../../src/react/providers/ModuleProvider.js"
-import { PropsRef, type PropsAdapter } from "../../src/core/providers/props-ref/props-ref.provider.js"
-import { useContainer, useModuleContext } from "../../src/react/hooks/useModuleContext.js"
-import { useResolve, useResolveOptional } from "../../src/react/hooks/useResolve.js"
-import { Container, inject } from "@remodulo/container"
+import { createModuleComponent } from "../../src/react/createModuleComponent.js"
+import { ModuleProvider } from "../../src/react/ModuleProvider.js"
+import { PropsRef, type PropsAdapter } from "../../src/primitives/props-ref.js"
+import { useModuleContext, useResolver } from "../../src/react/useModuleContext.js"
+import { useResolve, useResolveOptional } from "../../src/react/useResolve.js"
+import { Resolver, inject } from "@remodulo/container"
 import type { InjectionToken } from "@remodulo/container"
-import type { Provider } from "../../src/core/provider/provider.types.js"
+import type { Provider } from "../../src/core/provider.types.js"
 import { Root } from "../setup/react.js"
+import { flush } from "../setup/helpers.js"
 
 // `createModuleComponent` is a scoped `ModuleProvider` plus an automatic props bridge: whatever the component is
 // rendered with reaches the container as a `PropsRef`, without the module declaring anything props-related.
@@ -221,25 +222,32 @@ describe("createModuleComponent with a params callback", () => {
     })
 })
 
-// Options: propsAdapter + propsToken
+// Options: props.adapter + props.token
 // ========================================
 
-describe("createModuleComponent with { propsAdapter, propsToken }", () => {
+describe("createModuleComponent with a props bridge", () => {
     type Point = { x: number }
     type Boxed = { boxed: Point }
 
     const CUSTOM: InjectionToken<PropsRef<Boxed>> = Symbol.for("tests.createModuleComponent.custom")
 
     it("bridges through the adapter under the custom token", () => {
-        const adapter: PropsAdapter<Point, Boxed> = {
-            create: vi.fn((initial: Point) => ({ boxed: initial })),
-            update: vi.fn(({ current, next }: { current: Boxed; next: Point }) => {
-                current.boxed = next
+        // RESHAPED for the new model: the P -> T change is `use`'s job now, and the adapter works WITHIN
+        // T, keeping its target identity-stable across updates. Same two mechanics, split across the two
+        // hooks the config exposes.
+        const adapter: PropsAdapter<Boxed> = {
+            create: vi.fn((initial: Boxed) => initial),
+            update: vi.fn(({ current, next }: { current: Boxed; next: Boxed }) => {
+                current.boxed = next.boxed
                 return current
             }),
         }
 
-        const PointModule = createModuleComponent<Point, Boxed>({}, { propsAdapter: adapter, propsToken: CUSTOM })
+        const PointModule = createModuleComponent<Point, Boxed>(undefined, {
+            use: (props) => ({ boxed: props }),
+            adapter,
+            token: CUSTOM,
+        })
 
         let boxed: PropsRef<Boxed> | undefined
         let byClass: PropsRef<unknown> | undefined
@@ -266,7 +274,7 @@ describe("createModuleComponent with { propsAdapter, propsToken }", () => {
         render(<Harness />)
 
         expect(adapter.create).toHaveBeenCalledTimes(1)
-        expect(adapter.create).toHaveBeenCalledWith({ x: 1 })
+        expect(adapter.create).toHaveBeenCalledWith({ boxed: { x: 1 } })
         expect(byClass).toBeUndefined()
 
         const target = vi.mocked(adapter.create).mock.results[0]!.value
@@ -276,7 +284,7 @@ describe("createModuleComponent with { propsAdapter, propsToken }", () => {
 
         expect(adapter.create).toHaveBeenCalledTimes(1)
         expect(adapter.update).toHaveBeenCalledTimes(1)
-        expect(adapter.update).toHaveBeenCalledWith({ current: target, next: { x: 2 } })
+        expect(adapter.update).toHaveBeenCalledWith({ current: target, next: { boxed: { x: 2 } } })
         expect(boxed!.current).toBe(target)
         expect(boxed!.current.boxed).toEqual({ x: 2 })
     })
@@ -287,21 +295,21 @@ describe("createModuleComponent with { propsAdapter, propsToken }", () => {
 
 describe("createModuleComponent under a parent", () => {
     it("keeps the bridge across a rebuild of a scoped module under a parent", () => {
-        const UserModule = createModuleComponent<UserProps>((props) => ({ rebuildOn: [props.userId] }))
+        const UserModule = createModuleComponent<UserProps>((props) => ({ deps: [props.userId] }))
 
-        const containers: Container[] = []
+        const resolvers: Resolver[] = []
         let bridged: PropsRef<UserProps> | null = null
-        let parent: Container | null = null
+        let parent: Resolver | null = null
         let setProps: ((props: UserProps) => void) | null = null
 
         function Probe() {
             bridged = useResolve(PropsRef) as PropsRef<UserProps>
-            containers.push(useContainer())
+            resolvers.push(useResolver())
             return null
         }
 
         function ParentProbe() {
-            parent = useContainer()
+            parent = useResolver()
             return null
         }
 
@@ -320,16 +328,16 @@ describe("createModuleComponent under a parent", () => {
 
         render(<Harness />)
         const first = bridged
-        const firstContainer = containers.at(-1)
+        const firstResolver = resolvers.at(-1)
 
         act(() => setProps?.({ userId: "u2", name: "Cara" }))
 
-        expect(containers.at(-1)).not.toBe(firstContainer)
+        expect(resolvers.at(-1)).not.toBe(firstResolver)
         expect(bridged).toBe(first)
         expect(bridged!.current).toEqual({ userId: "u2", name: "Cara" })
         // Still a child of the same parent: the bridge resolves locally, `app` does not know it.
         expect(parent!.isRegistered(PropsRef, "self")).toBe(false)
-        expect(containers.at(-1)!.isRegistered(PropsRef, "self")).toBe(true)
+        expect(resolvers.at(-1)!.isRegistered(PropsRef, "self")).toBe(true)
     })
 })
 
@@ -407,7 +415,7 @@ describe("createModuleComponent with no arguments", () => {
     })
 })
 
-// rebuildOn derived from props
+// deps derived from props
 // ========================================
 
 describe("createModuleComponent rebuilding on a props-derived key", () => {
@@ -431,7 +439,7 @@ describe("createModuleComponent rebuilding on a props-derived key", () => {
 
     // The module declares nothing props-related: `createModuleComponent` bridges, and the factory injects.
     const UserModule = createModuleComponent<UserProps>((props) => ({
-        rebuildOn: [props.userId],
+        deps: [props.userId],
         providers: [
             { provide: UserService, useFactory: () => new UserService(inject<PropsRef<UserProps>>(PropsRef)) },
         ],
@@ -504,17 +512,18 @@ describe("createModuleComponent rebuilding on a props-derived key", () => {
         type Boxed = { boxed: UserProps }
         const TOKEN: InjectionToken<PropsRef<Boxed>> = Symbol.for("tests.createModuleComponent.rebuild-adapter")
 
-        const adapter: PropsAdapter<UserProps, Boxed> = {
-            create: vi.fn((initial: UserProps) => ({ boxed: initial })),
-            update: vi.fn(({ current, next }: { current: Boxed; next: UserProps }) => {
-                current.boxed = next
+        const adapter: PropsAdapter<Boxed> = {
+            create: vi.fn((initial: Boxed) => initial),
+            update: vi.fn(({ current, next }: { current: Boxed; next: Boxed }) => {
+                current.boxed = next.boxed
                 return current
             }),
         }
 
+        // The function config sees the ENRICHED props now, so `deps` reaches through the box.
         const AdaptedModule = createModuleComponent<UserProps, Boxed>(
-            (props) => ({ rebuildOn: [props.userId] }),
-            { propsAdapter: adapter, propsToken: TOKEN }
+            (props) => ({ deps: [props.boxed.userId] }),
+            { use: (raw) => ({ boxed: raw }), adapter, token: TOKEN }
         )
 
         let boxed: PropsRef<Boxed> | null = null
@@ -552,7 +561,10 @@ describe("createModuleComponent rebuilding on a props-derived key", () => {
         expect(adapter.create).toHaveBeenCalledTimes(1)
         expect(boxed).toBe(before)
         expect(boxed!.current).toBe(target)
-        expect(adapter.update).toHaveBeenCalledWith({ current: target, next: { userId: "u2", name: "Cara" } })
+        expect(adapter.update).toHaveBeenCalledWith({
+            current: target,
+            next: { boxed: { userId: "u2", name: "Cara" } },
+        })
     })
 
     it("stops delivering to a service the rebuild destroyed", async () => {
@@ -585,12 +597,12 @@ describe("createModuleComponent rebuilding on a props-derived key", () => {
 // so both siblings' services would fight over the one `PropsRef` class token. They can, and the capability
 // predates the rename — it was `{ token }`, inherited from `usePropsRefOptions` and never found. A
 // `PropsRef` subclass is a distinct class and therefore a distinct injection token, exactly as `Ref`
-// subclasses are for elements; `propsToken` is where a boundary names one.
+// subclasses are for elements; `props.token` is where a boundary names one.
 //
 // The subclass is a token, not a constructed type: the value registered under it is the plain `PropsRef`
 // the hook made, so `instanceof` the subclass is false. Pinned below rather than glossed over.
 
-describe("createModuleComponent with a PropsRef subclass as propsToken", () => {
+describe("createModuleComponent with a PropsRef subclass as props.token", () => {
     type LeftProps = { label: string }
     type RightProps = { count: number }
     type RightVM = { doubled: number }
@@ -617,14 +629,8 @@ describe("createModuleComponent with a PropsRef subclass as propsToken", () => {
         const LeftService = readerOf<LeftProps>(LeftPropsRef)
         const RightService = readerOf<RightProps>(RightPropsRef)
 
-        const LeftModule = createModuleComponent<LeftProps>(
-            { providers: [LeftService as unknown as Provider] },
-            { propsToken: LeftPropsRef }
-        )
-        const RightModule = createModuleComponent<RightProps>(
-            { providers: [RightService as unknown as Provider] },
-            { propsToken: RightPropsRef }
-        )
+        const LeftModule = createModuleComponent<LeftProps>({ providers: [LeftService as unknown as Provider] }, { token: LeftPropsRef })
+        const RightModule = createModuleComponent<RightProps>({ providers: [RightService as unknown as Provider] }, { token: RightPropsRef })
 
         let left: InstanceType<typeof LeftService> | null = null
         let right: InstanceType<typeof RightService> | null = null
@@ -656,12 +662,12 @@ describe("createModuleComponent with a PropsRef subclass as propsToken", () => {
     })
 
     it("keeps each sibling's token out of the other's container and off the app", () => {
-        const LeftModule = createModuleComponent<LeftProps>({}, { propsToken: LeftPropsRef })
-        const RightModule = createModuleComponent<RightProps>({}, { propsToken: RightPropsRef })
+        const LeftModule = createModuleComponent<LeftProps>(undefined, { token: LeftPropsRef })
+        const RightModule = createModuleComponent<RightProps>(undefined, { token: RightPropsRef })
 
         let inLeft: Record<string, unknown> = {}
         let inRight: Record<string, unknown> = {}
-        let app: Container | null = null
+        let app: Resolver | null = null
 
         function LeftProbe() {
             inLeft = {
@@ -682,7 +688,7 @@ describe("createModuleComponent with a PropsRef subclass as propsToken", () => {
         }
 
         function AppProbe() {
-            app = useContainer()
+            app = useResolver()
             return null
         }
 
@@ -718,14 +724,8 @@ describe("createModuleComponent with a PropsRef subclass as propsToken", () => {
         const LeftService = readerOf<LeftProps>(LeftPropsRef)
         const RightService = readerOf<RightProps>(RightPropsRef)
 
-        const LeftModule = createModuleComponent<LeftProps>(
-            { providers: [LeftService as unknown as Provider] },
-            { propsToken: LeftPropsRef }
-        )
-        const RightModule = createModuleComponent<RightProps>(
-            { providers: [RightService as unknown as Provider] },
-            { propsToken: RightPropsRef }
-        )
+        const LeftModule = createModuleComponent<LeftProps>({ providers: [LeftService as unknown as Provider] }, { token: LeftPropsRef })
+        const RightModule = createModuleComponent<RightProps>({ providers: [RightService as unknown as Provider] }, { token: RightPropsRef })
 
         let left: InstanceType<typeof LeftService> | null = null
         let right: InstanceType<typeof RightService> | null = null
@@ -764,11 +764,11 @@ describe("createModuleComponent with a PropsRef subclass as propsToken", () => {
         expect(right!.props.current).toEqual({ count: 7 })
     })
 
-    it("adapts through propsAdapter into a subclass propsToken", () => {
-        const adapter: PropsAdapter<RightProps, RightVM> = {
-            create: vi.fn((initial: RightProps) => ({ doubled: initial.count * 2 })),
-            update: vi.fn(({ current, next }: { current: RightVM; next: RightProps }) => {
-                current.doubled = next.count * 2
+    it("adapts through props.adapter into a subclass props.token", () => {
+        const adapter: PropsAdapter<RightVM> = {
+            create: vi.fn((initial: RightVM) => initial),
+            update: vi.fn(({ current, next }: { current: RightVM; next: RightVM }) => {
+                current.doubled = next.doubled
                 return current
             }),
         }
@@ -776,7 +776,7 @@ describe("createModuleComponent with a PropsRef subclass as propsToken", () => {
         const VMService = readerOf<RightVM>(RightVMRef)
         const VMModule = createModuleComponent<RightProps, RightVM>(
             { providers: [VMService as unknown as Provider] },
-            { propsAdapter: adapter, propsToken: RightVMRef }
+            { use: (props) => ({ doubled: props.count * 2 }), adapter, token: RightVMRef }
         )
 
         let vm: InstanceType<typeof VMService> | null = null
@@ -807,8 +807,141 @@ describe("createModuleComponent with a PropsRef subclass as propsToken", () => {
         const target = vi.mocked(adapter.create).mock.results[0]!.value
         act(() => setCount?.(5))
 
-        expect(adapter.update).toHaveBeenCalledWith({ current: target, next: { count: 5 } })
+        expect(adapter.update).toHaveBeenCalledWith({ current: target, next: { doubled: 10 } })
         expect(vm!.props.current).toEqual({ doubled: 10 })
         expect(vm!.seen).toEqual([{ doubled: 10 }])
     })
 })
+
+// The two-argument shape: a static bridge, a per-render config
+// ========================================
+//
+// The bridge is fixed when the component is created, which is what makes `use` safe: one identity for the
+// component's whole life, so the rules of hooks hold by construction rather than by convention. The module
+// config is resolved per render and, because enrichment is defined before any render, it sees the ENRICHED
+// props — so `deps` and a factory closure can track something `use` derived.
+
+describe("the two-argument shape", () => {
+    type OrderProps = { orderId: string }
+
+    it("rebuilds from deps derived from props, and the factory recaptures them", async () => {
+        const built: string[] = []
+
+        class OrderService {
+            constructor(readonly orderId: string) {
+                built.push(orderId)
+            }
+        }
+
+        // The owner's example: the factory closes over the props of the render that BUILT the module, and
+        // `deps` is what makes a new order rebuild the module so the closure is recaptured.
+        const OrderModule = createModuleComponent<OrderProps>((props) => ({
+            providers: [{ provide: OrderService, useFactory: () => new OrderService(props.orderId) }],
+            deps: [props.orderId],
+        }))
+
+        let seen: OrderService | null = null
+        function Probe() {
+            seen = useResolve(OrderService)
+            return null
+        }
+
+        function Harness({ orderId }: OrderProps) {
+            return (
+                <Root>
+                    <OrderModule orderId={orderId}>
+                        <Probe />
+                    </OrderModule>
+                </Root>
+            )
+        }
+
+        const { rerender } = render(<Harness orderId="a" />)
+        expect(built).toEqual(["a"])
+        expect(seen!.orderId).toBe("a")
+
+        rerender(<Harness orderId="b" />)
+        await flush()
+
+        // The loop: deps changed -> module rebuilt -> the factory ran again against the new props.
+        expect(built).toEqual(["a", "b"])
+        expect(seen!.orderId).toBe("b")
+    })
+
+    it("hands the config function the ENRICHED props, not the raw ones", async () => {
+        const seenDeps: string[] = []
+        type Enriched = { key: string }
+
+        const EnrichedModule = createModuleComponent<OrderProps, Enriched>(
+            (props) => {
+                seenDeps.push(props.key)
+                return { deps: [props.key] }
+            },
+            { use: (props) => ({ key: `k:${props.orderId}` }) }
+        )
+
+        function Harness({ orderId }: OrderProps) {
+            return (
+                <Root>
+                    <EnrichedModule orderId={orderId} />
+                </Root>
+            )
+        }
+
+        render(<Harness orderId="a" />)
+
+        // `use` ran first, so the config never sees `orderId` at all — only what enrichment produced.
+        expect(seenDeps[0]).toBe("k:a")
+    })
+
+    it("runs `use` as a real hook, and the enrichment is what reaches the token", () => {
+        const Multiplier = createContext(3)
+        type Scaled = { scaled: number }
+        const SCALED: InjectionToken<PropsRef<Scaled>> = Symbol.for("tests.cmc.scaled")
+
+        // `use` calls `useContext` — the contract that makes it a hook rather than a mapper.
+        const ScaledModule = createModuleComponent<{ n: number }, Scaled>(undefined, {
+            use: (props) => ({ scaled: props.n * useContext(Multiplier) }),
+            token: SCALED,
+        })
+
+        let ref: PropsRef<Scaled> | null = null
+        function Probe() {
+            ref = useResolve(SCALED)
+            return null
+        }
+
+        render(
+            <Multiplier.Provider value={10}>
+                <Root>
+                    <ScaledModule n={4}>
+                        <Probe />
+                    </ScaledModule>
+                </Root>
+            </Multiplier.Provider>
+        )
+
+        expect(ref!.current).toEqual({ scaled: 40 })
+    })
+
+    it("defaults the token to the PropsRef class when the bridge names none", () => {
+        const Bare = createModuleComponent<{ label: string }>()
+
+        let byClass: PropsRef<{ label: string }> | null = null
+        function Probe() {
+            byClass = useResolve(PropsRef) as PropsRef<{ label: string }>
+            return null
+        }
+
+        render(
+            <Root>
+                <Bare label="hi">
+                    <Probe />
+                </Bare>
+            </Root>
+        )
+
+        expect(byClass!.current).toEqual({ label: "hi" })
+    })
+})
+

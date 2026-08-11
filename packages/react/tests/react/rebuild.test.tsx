@@ -2,11 +2,11 @@ import { act, render } from "@testing-library/react"
 import { describe, expect, it } from "vitest"
 import { useState, type ReactNode } from "react"
 
-import { Container } from "@remodulo/container"
-import { ModuleTraversal } from "../../src/core/providers/module-traversal/module-traversal.provider.js"
-import { ModuleProvider } from "../../src/react/providers/ModuleProvider.js"
-import { useContainer, useModuleContext, useModuleRebuild } from "../../src/react/hooks/useModuleContext.js"
-import { useResolveOptional } from "../../src/react/hooks/useResolve.js"
+import { Resolver } from "@remodulo/container"
+import { ModuleTraversal } from "../../src/core/module-traversal.js"
+import { ModuleProvider } from "../../src/react/ModuleProvider.js"
+import { useModuleContext, useModuleRebuild, useResolver } from "../../src/react/useModuleContext.js"
+import { useResolveOptional } from "../../src/react/useResolve.js"
 import { Root } from "../setup/react.js"
 import { flush, tracked } from "../setup/helpers.js"
 
@@ -25,14 +25,14 @@ function Rebuilder({ capture }: { capture: (rebuild: () => void) => void }): Rea
     return null
 }
 
-describe("rebuildOn", () => {
+describe("deps", () => {
     it("never fires on the first render", () => {
         const log: string[] = []
         const Service = tracked(log, "S")
 
         render(
             <Root>
-                <ModuleProvider providers={[Service]} rebuildOn={["initial"]}>
+                <ModuleProvider providers={[Service]} deps={["initial"]}>
                     <div />
                 </ModuleProvider>
             </Root>
@@ -51,7 +51,7 @@ describe("rebuildOn", () => {
             bump = () => setTick((value) => value + 1)
             return (
                 <Root>
-                    <ModuleProvider providers={[Service]} rebuildOn={["stable"]}>
+                    <ModuleProvider providers={[Service]} deps={["stable"]}>
                         <span data-testid="tick">{tick}</span>
                     </ModuleProvider>
                 </Root>
@@ -77,7 +77,7 @@ describe("rebuildOn", () => {
         function Tree({ dep }: { dep: number }): ReactNode {
             return (
                 <Root>
-                    <ModuleProvider providers={[Service]} rebuildOn={[dep]}>
+                    <ModuleProvider providers={[Service]} deps={[dep]}>
                         <div />
                     </ModuleProvider>
                 </Root>
@@ -90,7 +90,9 @@ describe("rebuildOn", () => {
         rerender(<Tree dep={1} />)
         await flush()
 
-        expect(log).toEqual(["S:ctor", "S:init", "S:unmount", "S:destroy", "S:mount"])
+        // The outgoing generation's DESTROY trails the incoming one's mount: the provider's cleanup only
+        // schedules it, so the replacement is already live by the time the timer claims the old module.
+        expect(log).toEqual(["S:ctor", "S:init", "S:unmount", "S:mount", "S:destroy"])
         expect(Service.counts).toEqual({ init: 2, mount: 2, unmount: 1, destroy: 1 })
     })
 
@@ -101,7 +103,7 @@ describe("rebuildOn", () => {
         function Tree({ dep }: { dep: number[] }): ReactNode {
             return (
                 <Root>
-                    <ModuleProvider providers={[Service]} rebuildOn={dep}>
+                    <ModuleProvider providers={[Service]} deps={dep}>
                         <div />
                     </ModuleProvider>
                 </Root>
@@ -124,7 +126,7 @@ describe("rebuildOn", () => {
         function Tree({ dep }: { dep: number }): ReactNode {
             return (
                 <Root>
-                    <ModuleProvider providers={[Service]} rebuildOn={[dep]}>
+                    <ModuleProvider providers={[Service]} deps={[dep]}>
                         <div />
                     </ModuleProvider>
                 </Root>
@@ -148,7 +150,7 @@ describe("rebuildOn", () => {
         function Tree({ dep }: { dep: number[] | undefined }): ReactNode {
             return (
                 <Root>
-                    <ModuleProvider providers={[Service]} rebuildOn={dep}>
+                    <ModuleProvider providers={[Service]} deps={dep}>
                         <div />
                     </ModuleProvider>
                 </Root>
@@ -198,29 +200,31 @@ describe("manual rebuild", () => {
         await act(async () => {
             rebuild?.()
         })
+        await flush()
 
-        // The replacement is built and inited before the outgoing module hears about it, and only mounts
-        // once the old one has gone.
+        // The replacement is built and inited before the outgoing module hears about it, and mounts as soon
+        // as the old one has RETIRED — not once it is gone. The two generations overlap for one macrotask,
+        // which is the same window that lets a StrictMode remount take its destroy back.
         expect(log).toEqual([
             "S:ctor",
             "module:init#2",
             "S:init",
             "S:unmount",
             "module:unmount",
-            "S:destroy",
             "module:mount",
             "S:mount",
+            "S:destroy",
             "module:destroy",
         ])
         expect(Service.counts).toEqual({ init: 2, mount: 2, unmount: 1, destroy: 1 })
     })
 
-    it("swaps the container the context hands out", async () => {
-        const containers: Container[] = []
+    it("swaps the resolver the context hands out", async () => {
+        const resolvers: Resolver[] = []
         let rebuild: (() => void) | null = null
 
         function Probe(): ReactNode {
-            containers.push(useContainer())
+            resolvers.push(useResolver())
             return null
         }
 
@@ -237,9 +241,11 @@ describe("manual rebuild", () => {
             rebuild?.()
         })
 
-        expect(new Set(containers).size).toBe(2)
-        expect(containers.at(-1)).toBeInstanceOf(Container)
-        expect(containers.at(-1)).not.toBe(containers[0])
+        // A rebuild mints a new container, and `Resolver.for` is keyed by container — so a fresh resolver
+        // identity is exactly the observable that the container underneath was swapped.
+        expect(new Set(resolvers).size).toBe(2)
+        expect(resolvers.at(-1)).toBeInstanceOf(Resolver)
+        expect(resolvers.at(-1)).not.toBe(resolvers[0])
     })
 
     it("coalesces several rebuilds in one tick into one", async () => {
@@ -261,8 +267,9 @@ describe("manual rebuild", () => {
             rebuild?.()
             rebuild?.()
         })
+        await flush()
 
-        expect(log).toEqual(["S:ctor", "S:init", "S:unmount", "S:destroy", "S:mount"])
+        expect(log).toEqual(["S:ctor", "S:init", "S:unmount", "S:mount", "S:destroy"])
         expect(Service.counts).toEqual({ init: 2, mount: 2, unmount: 1, destroy: 1 })
     })
 
@@ -285,6 +292,7 @@ describe("manual rebuild", () => {
         await act(async () => {
             rebuild?.()
         })
+        await flush()
 
         expect(Service.counts).toEqual({ init: 3, mount: 3, unmount: 2, destroy: 2 })
     })
@@ -355,16 +363,21 @@ describe("rebuild across a module tree", () => {
         })
         await flush()
 
+        // FLIPPED with the render-phase cascade. The child's replacement is now built DURING the parent's
+        // re-render, so it lands immediately after the parent's own — where it used to wait for the
+        // parent's effects to run and appear after `P:mount`. Same events, same counts, one pass instead
+        // of two, and the interleaving now matches the "new before old" contract this file opens with:
+        // both generations are briefly alive, and the outgoing one is torn down behind the incoming one.
         expect(log).toEqual([
             "P:ctor",
             "P:init",
-            "C:unmount",
-            "P:unmount",
-            "C:destroy",
-            "P:mount",
             "C:ctor",
             "C:init",
+            "C:unmount",
+            "P:unmount",
+            "P:mount",
             "C:mount",
+            "C:destroy",
             "P:destroy",
         ])
         expect(Parent.counts).toEqual({ init: 2, mount: 2, unmount: 1, destroy: 1 })
@@ -372,16 +385,16 @@ describe("rebuild across a module tree", () => {
     })
 
     it("gives the child a new container and reattaches it to the new parent", async () => {
-        const childContainers: Container[] = []
+        const childResolvers: Resolver[] = []
         let rebuild: (() => void) | null = null
-        let parentContainer: Container | null = null
+        let parentResolver: Resolver | null = null
 
         function ParentProbe(): ReactNode {
-            parentContainer = useContainer()
+            parentResolver = useResolver()
             return null
         }
         function ChildProbe(): ReactNode {
-            childContainers.push(useContainer())
+            childResolvers.push(useResolver())
             return null
         }
 
@@ -402,11 +415,11 @@ describe("rebuild across a module tree", () => {
         })
         await flush()
 
-        expect(new Set(childContainers).size).toBe(2)
+        expect(new Set(childResolvers).size).toBe(2)
 
-        // Traversal answers in modules; the container the probe captured is reached through `.container`.
-        const children = parentContainer!.resolve(ModuleTraversal).children()
-        expect(children.map((child) => child.container)).toEqual([childContainers.at(-1)])
+        // Traversal answers in modules; the resolver the probe captured is reached through `.resolver`.
+        const children = parentResolver!.resolve(ModuleTraversal).children()
+        expect(children.map((child) => child.resolver)).toEqual([childResolvers.at(-1)])
     })
 
     it("cascades down two scoped levels", async () => {
@@ -532,7 +545,7 @@ describe("rebuild across a module tree", () => {
         })
         await flush()
 
-        expect(log).toEqual(["C:ctor", "C:init", "C:unmount", "C:destroy", "C:mount"])
+        expect(log).toEqual(["C:ctor", "C:init", "C:unmount", "C:mount", "C:destroy"])
         expect(Parent.counts).toEqual({ init: 1, mount: 1, unmount: 0, destroy: 0 })
     })
 })

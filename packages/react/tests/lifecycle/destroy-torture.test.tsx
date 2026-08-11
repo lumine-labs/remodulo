@@ -1,13 +1,17 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { act, render } from "@testing-library/react"
-import { Component, useState, type ReactNode } from "react"
+import { Activity, Component, useLayoutEffect, useState, type ReactNode } from "react"
 
 import { inject } from "@remodulo/container"
-import { Module } from "../../src/core/module/module.js"
-import { ModuleProvider } from "../../src/react/providers/ModuleProvider.js"
-import { ModuleTraversal } from "../../src/core/providers/module-traversal/module-traversal.provider.js"
+import { Module } from "../../src/core/module.js"
+import { ModuleStatus } from "../../src/core/module-lifecycle.types.js"
+import { ModuleProvider } from "../../src/react/ModuleProvider.js"
+import { ModuleTraversal } from "../../src/core/module-traversal.js"
+import { useModuleContext } from "../../src/react/useModuleContext.js"
+import type { Provider } from "../../src/types.js"
 import type { HookCounts } from "../setup/helpers.js"
-import { flush, makeApp, makeChild, tracked } from "../setup/helpers.js"
+import { flush, makeApp, makeChild, refuses, tracked } from "../setup/helpers.js"
+import { assertTreeInvariant } from "../setup/invariants.js"
 import { Root } from "../setup/react.js"
 
 // Destroy torture.
@@ -17,12 +21,16 @@ import { Root } from "../setup/react.js"
 // that can be called out of order by a caller holding a module reference. The five edges below are the ones
 // the rest of the suite leaves open:
 //
-//   1. destroy with NO prior unmount, on a live mounted module and on a mounted subtree;
-//   2. two destroys in flight at once, at microtask resolution — not "eventually collapses";
+//   1. destroy with NO prior unmount, on a live mounted module and on a mounted subtree — REFUSED;
+//   2. two destroys in flight at once, at microtask resolution — the collapse, and what it does NOT promise;
 //   3. a descendant destroying itself while an ancestor's destroy is still draining;
-//   4. destroy after a mount that threw — the imperative escape hatch, checked for completeness;
+//   4. destroy after a mount that threw — the imperative escape hatch, REOPENED;
 //   5. unmount throwing does not cost the destroy phase — imperatively, and through ModuleProvider's
-//      `try { unmount() } finally { void destroy() }` cleanup.
+//      `try { unmount() } finally { scheduleDestroy() }` cleanup.
+//
+// `mounted` is the one state destroy() refuses, so section 1 pins the refusal plus the ruled path behind it.
+// Everything else it serves: sections 2 and 3 pin the claimed states collapsing to a no-op rather than
+// rejecting, and section 4 pins `failed` draining in full — the leak the throwing-gate round had booked.
 //
 // Already pinned elsewhere and deliberately not repeated: destroy ORDER (`ordering.test.ts` "destroy"),
 // destroy hooks that throw (`errors.test.ts` "destroy", `errors-torture.test.tsx` "destroy errors"),
@@ -34,30 +42,25 @@ afterEach(() => {
 })
 
 const ONCE: HookCounts = { init: 1, mount: 1, unmount: 1, destroy: 1 }
-/** Mounted, then destroyed with no unmount in between. */
-const UNMOUNT_SKIPPED: HookCounts = { init: 1, mount: 1, unmount: 0, destroy: 1 }
 
 // 1. Destroy while still mounted
 // ========================================
 
 describe("destroy while still mounted", () => {
     /**
-     * MEASURED SEMANTIC — destroy runs the destroy phase and nothing else, but the flags still tell the truth.
+     * RULED PATH ENFORCEMENT — "if we called mount, we have to call unmount before destroy."
      *
-     * `ModuleLifecycle.destroy()` claims the subtree and calls `#runDestroyPhase()`; there is no
-     * unmount-if-mounted branch anywhere in it. An instance destroyed straight out of a mounted module is
-     * therefore notified of its death without ever having been notified of its retirement: `onModuleUnmount`
-     * is skipped for good, not deferred, and the module's own `onModuleUnmount` goes with it.
+     * This describe used to pin a capability: `destroy()` claimed the subtree and ran the destroy phase with
+     * no unmount-if-mounted branch anywhere in it, so an instance could be notified of its death without
+     * ever having been notified of its retirement. `onModuleUnmount` was skipped for good, not deferred.
+     * That was the imperative caller's rope, and the round that made every gate a throw cut it: `mounted` is
+     * not in destroy()'s allow-set, so the shortcut is now a refusal and the unmount is mandatory.
      *
-     * The state flags are the other half, and they are NOT derived from the hooks. `#claimSubtree` resets
-     * `#committed` and `#mounted` together behind the detach, so the invariant a caller can rely on is:
-     * a claimed module reports neither committed nor mounted, whether or not an unmount phase ever ran.
-     * Hooks fired and flags cleared are separate facts here — this test is where they come apart.
-     *
-     * React never reaches this state: `ModuleProvider`'s cleanup always unmounts before it destroys. This is
-     * purely the imperative caller's rope.
+     * What this buys is that a destroy hook can rely on its unmount hook having run — the pairing that the
+     * old shortcut was the one way to break. React was already on the ruled path: its cleanup has always
+     * unmounted before it scheduled the destroy.
      */
-    it("skips the unmount phase for every instance while still clearing `mounted`", async () => {
+    it("refuses, and the ruled path pairs every unmount with its destroy", async () => {
         const log: string[] = []
         const service = tracked(log, "A")
         const other = tracked(log, "B")
@@ -69,27 +72,25 @@ describe("destroy while still mounted", () => {
         module.mount()
         log.length = 0
 
+        await expect(module.destroy()).rejects.toThrow(refuses("destroy", "mounted"))
+
+        // Refused at the gate: nothing claimed, nothing drained, the module is still live.
+        expect(log).toEqual([])
+        expect(module.status).not.toBeOneOf([ModuleStatus.Destroying, ModuleStatus.Destroyed])
+        expect(module.status).toBe(ModuleStatus.Mounted)
+
+        module.unmount()
         await module.destroy()
 
-        // Destroy phase only — reversed instances, then the module hook. No unmount entry of any kind.
-        expect(log).toEqual(["B:destroy", "A:destroy", "module:destroy"])
-        expect(service.counts).toEqual(UNMOUNT_SKIPPED)
-        expect(other.counts).toEqual(UNMOUNT_SKIPPED)
-
-        // Claimed and destroyed, still initialized, and honestly no longer mounted — even though nothing
-        // ever ran an unmount phase on it.
-        expect(module.claimed).toBe(true)
-        expect(module.initialized).toBe(true)
-        expect(module.mounted).toBe(false)
-
-        // A late unmount signal cannot repair it — the `#destroyed` guard is first in `unmount()`.
-        log.length = 0
-        module.unmount()
-        expect(log).toEqual([])
-        expect(service.counts).toEqual(UNMOUNT_SKIPPED)
+        // Both phases, in order, and every instance got the pair the shortcut used to be able to break.
+        expect(log).toEqual(["B:unmount", "A:unmount", "module:unmount", "B:destroy", "A:destroy", "module:destroy"])
+        expect(service.counts).toEqual(ONCE)
+        expect(other.counts).toEqual(ONCE)
+        expect(module.status).toBeOneOf([ModuleStatus.Destroying, ModuleStatus.Destroyed])
+        expect(module.status).not.toBe(ModuleStatus.Mounted)
     })
 
-    it("claims a mounted three-level subtree and destroys it leaf-first, detaching every level", async () => {
+    it("refuses from the root of a mounted three-level subtree without claiming any of it", async () => {
         const log: string[] = []
         const root = tracked(log, "P")
         const middle = tracked(log, "C")
@@ -103,32 +104,61 @@ describe("destroy while still mounted", () => {
         app.mount()
 
         // Fully live and fully linked before the destroy.
-        expect([app.mounted, child.mounted, grandchild.mounted]).toEqual([true, true, true])
+        expect([app.status, child.status, grandchild.status]).toEqual([
+            ModuleStatus.Mounted,
+            ModuleStatus.Mounted,
+            ModuleStatus.Mounted,
+        ])
         expect(app.children.size).toBe(1)
         expect(child.children.size).toBe(1)
+        assertTreeInvariant(app)
         log.length = 0
 
+        await expect(app.destroy()).rejects.toThrow(refuses("destroy", "mounted"))
+
+        // The gate is ahead of `#claimSubtree`, so a refused destroy is total: no level was claimed, no
+        // level was detached, and the tree is exactly as live as it was.
+        expect([app.status, child.status, grandchild.status]).not.toContain(ModuleStatus.Destroying)
+        expect([app.status, child.status, grandchild.status]).not.toContain(ModuleStatus.Destroyed)
+        expect([app.status, child.status, grandchild.status]).toEqual([
+            ModuleStatus.Mounted,
+            ModuleStatus.Mounted,
+            ModuleStatus.Mounted,
+        ])
+        expect(app.children.size).toBe(1)
+        expect(log).toEqual([])
+
+        app.unmount()
         await app.destroy()
 
-        // LIFO across the whole subtree, and not one unmount hook anywhere in it.
-        expect(log).toEqual(["G:destroy", "C:destroy", "P:destroy"])
-        expect([root.counts, middle.counts, leaf.counts]).toEqual([
-            UNMOUNT_SKIPPED,
-            UNMOUNT_SKIPPED,
-            UNMOUNT_SKIPPED,
+        // The ruled path reaches the same end state the shortcut used to: LIFO across the whole subtree,
+        // every node claimed and unlinked, nothing left reachable by traversal.
+        expect(log).toEqual([
+            "G:unmount",
+            "C:unmount",
+            "P:unmount",
+            "G:destroy",
+            "C:destroy",
+            "P:destroy",
         ])
-
-        // `#claimSubtree` unlinks each node from its parent as it claims it, so nothing is reachable by
-        // traversal — the point of doing the claim synchronously before any hook awaits. Every level takes
-        // the same flag reset with it, so no destroyed node anywhere in the subtree still reports mounted.
-        expect([app.claimed, child.claimed, grandchild.claimed]).toEqual([true, true, true])
-        expect([app.mounted, child.mounted, grandchild.mounted]).toEqual([false, false, false])
+        expect([root.counts, middle.counts, leaf.counts]).toEqual([ONCE, ONCE, ONCE])
+        for (const node of [app, child, grandchild]) {
+            expect(node.status).toBeOneOf([ModuleStatus.Destroying, ModuleStatus.Destroyed])
+        }
         expect(app.children.size).toBe(0)
         expect(child.children.size).toBe(0)
-        expect(app.container.resolve(ModuleTraversal).descendants()).toEqual([])
+
+        // FLIPPED when `destroyed` joined the resolution gate's refuse-set. This used to read the traversal
+        // view off the corpse and assert it saw no descendants; now the corpse answers no reads at all, so
+        // the question cannot be asked. The two `children.size` checks above are the direct proof, and the
+        // refusal is the stronger statement: there is nothing reachable BECAUSE there is nothing to ask.
+        expect(() => app.container.resolve(ModuleTraversal)).toThrow(
+            /Cannot resolve ModuleTraversal from a module whose status is "destroyed"/
+        )
+        assertTreeInvariant(app)
     })
 
-    it("detaches a mounted child from a parent that stays alive, and the parent's later unmount misses it", async () => {
+    it("detaches an unmounted child from a parent that stays mounted, and the parent's later unmount misses it", async () => {
         const log: string[] = []
         const parentService = tracked(log, "P")
         const childService = tracked(log, "C")
@@ -138,68 +168,86 @@ describe("destroy while still mounted", () => {
         parent.mount()
         log.length = 0
 
+        // A child can still leave a LIVE parent on its own — it just has to retire itself first. Its unmount
+        // does not cascade upward, so the parent is untouched and stays mounted throughout.
+        await expect(child.destroy()).rejects.toThrow(refuses("destroy", "mounted"))
+        child.unmount()
         await child.destroy()
 
-        expect(log).toEqual(["C:destroy"])
+        expect(log).toEqual(["C:unmount", "C:destroy"])
         expect(parent.children.size).toBe(0)
+        expect(parent.status).toBe(ModuleStatus.Mounted)
         expect(parentService.counts).toEqual({ init: 1, mount: 1, unmount: 0, destroy: 0 })
+        assertTreeInvariant(parent)
 
-        // The parent is untouched and still mounted; its own teardown walks a subtree the child has left.
+        // The parent's own teardown then walks a subtree the child has already left.
         log.length = 0
         parent.unmount()
         await parent.destroy()
 
         expect(log).toEqual(["P:unmount", "P:destroy"])
-        expect(childService.counts).toEqual(UNMOUNT_SKIPPED)
+        expect(childService.counts).toEqual(ONCE)
         expect(parentService.counts).toEqual(ONCE)
     })
 
     /**
-     * The knock-on of `#mounted` falling in the claim, pinned because it is load-bearing.
+     * The mistake refused at both doors now, and the second one is what this comment used to characterize.
      *
-     * A destroyed module stays `initialized`, and the child-construction guard reads `parent.initialized` —
-     * so building a child under a corpse is allowed, and always was. What stops it going live is the mount
-     * gate one level down, `if (!parent || parent.mounted)`, and that gate only bites because the claim now
-     * clears `#mounted`. Before the flag fell with the claim, a parent destroyed straight out of a mounted
-     * state still reported `mounted === true`, and this child would have mounted itself into a live subtree
-     * hanging off a destroyed module.
+     * It read: building a child under a corpse is allowed, and what stops it going live is the cascade
+     * condition one level down, `if (!parent || parent.status === Mounted)`. That described a shape nobody
+     * wanted — the child ATTACHED to the corpse first and was merely declined the cascade. Two guards close
+     * it from both ends now: construction is refused at `new`, and `mount()` refuses a dead parent BEFORE
+     * `addChild`. See "the linked-but-dead invariant" at the end of this file for the second half.
      */
-    it("does not mount a child created under a destroyed parent", async () => {
+    it("refuses to CREATE a child under a destroyed parent", async () => {
         const log: string[] = []
         const parent = makeApp({ providers: [tracked(log, "P")] })
         parent.mount()
+        parent.unmount()
         await parent.destroy()
 
-        // The gate's premise: destroyed straight from mounted, so no unmount phase ever ran here.
-        expect(parent.claimed).toBe(true)
-        expect(parent.mounted).toBe(false)
-        expect(parent.initialized).toBe(true)
+        expect(parent.status).toBe(ModuleStatus.Destroyed)
         log.length = 0
 
-        const childService = tracked(log, "C")
-        const child = new Module(parent, { providers: [childService] })
-        child.init()
-        child.mount()
+        // The end of a three-round migration for one mistake. It began as "the child inits, attaches, and
+        // sits inert under the corpse — the caller owns getting rid of it"; then the ancestor walk moved
+        // the refusal to `init()`; now the guard refuses at `new`. Each step moved it closer to the line
+        // that is actually wrong, and there was never anything useful to do with the object it returned.
+        expect(() => new Module(parent, { providers: [tracked(log, "C")] })).toThrow(
+            'Cannot create a child module under a destroyed parent — that branch is spent, so the child could never be armed. Build it under a live parent, or rebuild the branch first.'
+        )
 
-        // The refusal is the parent gate, not the `#initialized` guard: init ran in full, mount did not.
-        expect(child.initialized).toBe(true)
-        expect(child.mounted).toBe(false)
-        expect(childService.counts).toEqual({ init: 1, mount: 0, unmount: 0, destroy: 0 })
-        expect(log).toEqual(["C:ctor", "C:init"])
-
-        // MEASURED: `attach()` runs BEFORE the gate, so the gated child is still linked to the corpse — it
-        // is reachable and unmounted, not unreachable. Nothing walks it (the parent is claimed and its
-        // cascades are spent), so it is inert; the caller that built it owns getting rid of it.
-        expect(parent.children.size).toBe(1)
-
-        // Which it can: the child is still independently claimable — destroy runs its hooks and detaches it.
-        log.length = 0
-        await child.destroy()
-
-        expect(log).toEqual(["C:destroy"])
-        expect(childService.counts).toEqual({ init: 1, mount: 0, unmount: 0, destroy: 1 })
-        expect(child.claimed).toBe(true)
+        // Nothing built, nothing attached, nothing to dispose of.
+        expect(log).toEqual([])
         expect(parent.children.size).toBe(0)
+    })
+
+    it("refuses to create a child under a parent that is still draining", async () => {
+        const log: string[] = []
+        const entered = deferredClaim()
+        const release = deferredClaim()
+        const Blocking = class {
+            async onModuleDestroy(): Promise<void> {
+                entered.resolve()
+                await release.promise
+            }
+        }
+
+        const parent = makeApp({ providers: [Blocking as unknown as Provider] })
+        const inFlight = parent.destroy()
+        await entered.promise
+        expect(parent.status).toBe(ModuleStatus.Destroying)
+
+        // `destroying` is refused with the dead states, NOT served the way it is for reads. The claim walk
+        // took its snapshot before this child existed, so the parent's drain would never reach it, and the
+        // parent lands `destroyed` moments later — a dead end with extra steps.
+        expect(() => new Module(parent, {})).toThrow(
+            'Cannot create a child module under a destroying parent — that branch is spent, so the child could never be armed. Build it under a live parent, or rebuild the branch first.'
+        )
+
+        release.resolve()
+        await inFlight
+        expect(log).toEqual([])
     })
 })
 
@@ -208,17 +256,17 @@ describe("destroy while still mounted", () => {
 
 describe("two destroys in flight", () => {
     /**
-     * MEASURED SEMANTIC — the second call resolves on a microtask, long before the first finishes.
+     * MEASURED SEMANTIC — the second call RESOLVES on a microtask, long before the first finishes.
      *
      * `destroy()` is `async`, so everything up to its first `await` runs synchronously: `#claimSubtree()`
-     * and the `node.#destroyed = true` loop are both done by the time the first call has returned its
-     * promise. The second call therefore takes the `if (this.#destroyed) return` exit and resolves
-     * immediately — it is a "somebody else has this" answer, NOT a join on the work in flight.
+     * and the whole subtree's flip to `destroying` are both done by the time the first call has returned its
+     * promise. The second call therefore finds an already-claimed subtree, gets an empty node list back, and
+     * falls straight out of the loop. It is a no-op, and it is NOT a join on the work in flight.
      *
-     * Practical consequence: `await module.destroy()` only means "destroyed" for the caller that won the
-     * claim. A second caller awaiting it gets control back while hooks are still draining, and there is no
-     * handle anywhere that lets it wait for them. `idempotence.test.ts:106` pins the same collapse across a
-     * 5ms sleep; the point here is that it is a microtask, and that the settle ORDER is inverted.
+     * Practical consequence, and the price of collapsing rather than refusing: `await module.destroy()` only
+     * means "destroyed" for the caller that won the claim. The loser's promise resolves while hooks are
+     * still draining, and there is no handle anywhere that lets it wait for them — `module.status` is the
+     * only read that tells the two apart.
      */
     it("resolves the second call before the first has run a single destroy hook", async () => {
         const log: string[] = []
@@ -234,12 +282,20 @@ describe("two destroys in flight", () => {
 
         const settled: string[] = []
         const winner = module.destroy().then(() => settled.push("winner"))
-        const loser = module.destroy().then(() => settled.push("loser"))
+        const loser = module.destroy().then(
+            () => settled.push("loser"),
+            (error: Error) => {
+                throw new Error(`the loser rejected, but a claimed module collapses: ${error.message}`)
+            }
+        )
 
         await loser
 
-        // The second promise is already settled while the first has not reached one hook.
+        // The second promise is already settled — as a RESOLUTION — while the first has not reached one hook.
+        // The module is claimed but not yet spent, which is the honest answer the promise cannot carry.
         expect(settled).toEqual(["loser"])
+        expect(module.status).toBeOneOf([ModuleStatus.Destroying, ModuleStatus.Destroyed])
+        expect(module.status).not.toBe(ModuleStatus.Destroyed)
         expect(log).toEqual([])
 
         await winner
@@ -265,9 +321,9 @@ describe("two destroys in flight", () => {
         const outer = parent.destroy()
         const inner = child.destroy()
 
-        // The child was claimed and marked destroyed by the parent's synchronous head, so its own call is a
-        // no-op that resolves ahead of the work.
-        await inner
+        // The child was claimed by the parent's synchronous head, so its own call collapses ahead of the
+        // work — and the child is still drained exactly once, by the walk that took it.
+        await expect(inner).resolves.toBeUndefined()
         expect(log).toEqual([])
 
         await outer
@@ -281,7 +337,7 @@ describe("two destroys in flight", () => {
 // ========================================
 
 describe("destroy during an ancestor's destroy", () => {
-    it("is a no-op when a child destroys itself while the ancestor's drain is mid-flight", async () => {
+    it("collapses when a child destroys itself while the ancestor's drain is mid-flight", async () => {
         const log: string[] = []
         const parentService = tracked(log, "P")
         const childService = tracked(log, "C", { destroyDelay: 40 })
@@ -298,8 +354,10 @@ describe("destroy during an ancestor's destroy", () => {
         await new Promise((resolve) => setTimeout(resolve, 10))
         expect(log).toEqual([])
 
-        // Resolves rather than throwing, and adds nothing.
+        // Collapsed rather than joined, and it adds nothing: the call resolves while the ancestor still has
+        // the claim and has not finished with it. The child is not yet `destroyed` at this point.
         await expect(child.destroy()).resolves.toBeUndefined()
+        expect(child.status).not.toBe(ModuleStatus.Destroyed)
         expect(log).toEqual([])
 
         await ancestor
@@ -310,15 +368,22 @@ describe("destroy during an ancestor's destroy", () => {
     })
 
     /**
-     * MEASURED SEMANTIC — a re-entrant `module.destroy()` from inside a destroy hook cannot deadlock.
+     * MEASURED SEMANTIC — a re-entrant `module.destroy()` from inside a destroy hook cannot deadlock, and it
+     * no longer costs the hook its tail either.
      *
      * The hook is being awaited by `#runDestroyPhase`, which is being awaited by the very `destroy()` the
      * hook calls again. That would be a self-join if the guard were a promise; because it is the synchronous
-     * `#destroyed` flag — already set before the first hook ran — the re-entrant call returns an
-     * already-resolved promise and the hook completes normally. The escaping-hatch shape (a service that
-     * tears down its own module) is therefore safe rather than fatal.
+     * `destroying` status — already set before the first hook ran — the re-entrant call settles immediately
+     * and nothing hangs.
+     *
+     * HOW it settles has now moved twice. The throwing-gate round made it reject, which propagated out of
+     * the `await`, abandoned the rest of the hook body and left one `console.error("module.destroy", …)` as
+     * the only trace. Collapsing the claimed states puts it back to resolving, so the hook runs to its end
+     * and the drain has nothing to report. This is the one place the collapse buys something concrete
+     * beyond tidiness: `destroy()` is the signal most likely to be re-sent by a service tearing itself down,
+     * and it is now the one signal that can be.
      */
-    it("does not deadlock when a provider's own destroy hook calls module.destroy()", async () => {
+    it("does not deadlock when a provider's own destroy hook calls module.destroy(), and completes the hook", async () => {
         const log: string[] = []
         const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {})
         const parentService = tracked(log, "P")
@@ -347,8 +412,11 @@ describe("destroy during an ancestor's destroy", () => {
 
         await parent.destroy()
 
+        // "R:exit" is back: the re-entrant call resolved, so the `await` returned and the hook ran on.
         expect(log).toEqual(["R:enter", "R:exit", "P:destroy"])
         expect(parentService.counts).toEqual(ONCE)
+
+        // And nothing to report — the drain saw no error at all.
         expect(errorSpy).not.toHaveBeenCalled()
     })
 })
@@ -358,12 +426,20 @@ describe("destroy during an ancestor's destroy", () => {
 
 describe("destroy after a failed mount", () => {
     /**
-     * `errors-torture.test.tsx:129` establishes that the escape hatch exists at all (one provider's destroy
-     * ran). The question here is whether it is COMPLETE: a mount that aborted halfway leaves instances in
-     * three different states — mounted, throwing, never reached — and all three are still in `#instances`,
-     * so all three must be destroyed. They are.
+     * THE ESCAPE HATCH, REOPENED. This section existed to check it, the throwing-gate round closed it, and
+     * the round after that admitted `failed` back into destroy()'s allow-set to open it again.
+     *
+     * A mount that aborted halfway leaves instances in three different states — mounted-then-rolled-back,
+     * throwing, never reached — and all three are participants that ran their `onModuleInit`, so all three
+     * are drained. That is what makes the failure survivable: it is not the caller's fault that one
+     * provider's `onModuleMount` threw, and the cost of refusing was every instance in the module,
+     * permanently.
+     *
+     * The invariant that makes this safe rather than reckless is that `failed` implies DETACHED (pinned in
+     * `rulings.test.ts` §10): mount()'s catch removes the module from its parent before it writes the
+     * status, so the caller is always claiming an island nothing live can see.
      */
-    it("gives every instance its destroy hook, whether it mounted, threw, or was never reached", async () => {
+    it("destroys the module in full, draining every instance it built", async () => {
         const log: string[] = []
         const mounted = tracked(log, "A")
         const thrower = tracked(log, "B", { throwOn: "mount" })
@@ -378,19 +454,22 @@ describe("destroy after a failed mount", () => {
         log.length = 0
 
         expect(() => module.mount()).toThrow("B mount")
-        expect(log).toEqual(["A:mount"])
+        // The rollback retires what had already mounted, and lands the module in `failed`.
+        expect(log).toEqual(["A:mount", "A:unmount"])
         log.length = 0
 
         await module.destroy()
 
-        // Reverse declaration order across the whole participant set, module hook last.
+        // Reverse registration order, and no state is skipped: every one of the three reached its
+        // onModuleInit during the init phase, so every one of them owns something to release.
         expect(log).toEqual(["C:destroy", "B:destroy", "A:destroy", "module:destroy"])
-        expect(mounted.counts).toEqual({ init: 1, mount: 1, unmount: 0, destroy: 1 })
+        expect(mounted.counts).toEqual({ init: 1, mount: 1, unmount: 1, destroy: 1 })
         expect(thrower.counts).toEqual({ init: 1, mount: 0, unmount: 0, destroy: 1 })
         expect(unreached.counts).toEqual({ init: 1, mount: 0, unmount: 0, destroy: 1 })
+        expect(module.status).toBe(ModuleStatus.Destroyed)
     })
 
-    it("leaves the failed module detached and makes a second destroy a no-op", async () => {
+    it("leaves the failed module detached, unreachable, and destroyable exactly once", async () => {
         const log: string[] = []
         const service = tracked(log, "A")
         const app = makeApp()
@@ -399,19 +478,16 @@ describe("destroy after a failed mount", () => {
         const module = makeChild(app, { providers: [service, tracked(log, "B", { throwOn: "mount" })] })
         expect(() => module.mount()).toThrow("B mount")
 
-        // mount()'s catch already detached it; destroy's claim must not resurrect the link.
+        // mount()'s catch detached it, so the caller holding the reference is the only route back to it —
+        // and that route now works. The repeat collapses on the claim like any other.
         expect(app.children.size).toBe(0)
         await module.destroy()
-        expect(app.children.size).toBe(0)
-        expect(module.claimed).toBe(true)
-
-        log.length = 0
         await expect(module.destroy()).resolves.toBeUndefined()
-        expect(log).toEqual([])
+        expect(module.status).toBe(ModuleStatus.Destroyed)
         expect(service.counts.destroy).toBe(1)
 
-        // And the live App above it is untouched by any of it.
-        expect(app.mounted).toBe(true)
+        // And the live App above it is untouched by any of it — the failure stayed bounded to the island.
+        expect(app.status).toBe(ModuleStatus.Mounted)
         app.unmount()
         await app.destroy()
         expect(service.counts.destroy).toBe(1)
@@ -477,9 +553,9 @@ describe("unmount errors do not cost the destroy phase", () => {
     /**
      * MEASURED SEMANTIC — the React path, and where the AggregateError lands.
      *
-     * `ModuleProvider`'s cleanup is `try { module.unmount() } finally { void module.destroy() }`. The finally
-     * is what makes a throwing `onModuleUnmount` survivable: the module is still destroyed, so no instance is
-     * left holding resources, and the error is then free to leave the cleanup.
+     * `ModuleProvider`'s cleanup is `try { module.unmount() } finally { scheduleDestroy(module) }`. The
+     * finally is what makes a throwing `onModuleUnmount` survivable: the destroy is still scheduled, so no
+     * instance is left holding resources, and the error is then free to leave the cleanup.
      *
      * Where it lands, measured on React 19.2 + jsdom, depends on whether a boundary is in the deletion path:
      *
@@ -489,8 +565,8 @@ describe("unmount errors do not cost the destroy phase", () => {
      *     "The above error occurred in <ModuleProvider>" line to `console.error`, and the boundary swaps in
      *     its fallback. A throwing unmount hook therefore takes the boundary's whole subtree down with it.
      *
-     * Either way the destroy phase is already complete-in-flight by the time the error is visible, because
-     * the finally ran before the throw propagated.
+     * Either way the destroy phase is already SCHEDULED by the time the error is visible, because the
+     * finally ran before the throw propagated; it runs a macrotask later, which is what `flush()` waits for.
      */
     it("React: destroys the module even though unmount threw, and rethrows out of the commit", async () => {
         const log: string[] = []
@@ -589,10 +665,69 @@ describe("unmount errors do not cost the destroy phase", () => {
         expect(() => unmount()).toThrow(AggregateError)
         await flush()
 
-        // Effects clean up child-first. The child's cleanup throws AFTER its finally scheduled the destroy,
-        // and React keeps walking the deletion — so the parent module completes both of its phases too.
+        // MEASURED: React walks a deleted tree TOP-DOWN, so the App's cleanup lands first and its unmount
+        // cascade is what runs both modules' unmount hooks — child-first within the cascade, which is where
+        // the ordering below comes from. The nested providers' own cleanups then find their modules already
+        // retired and stay silent, by the hook's `status === mounted` check rather than by the module absorbing them.
         expect(log).toEqual(["C:unmount", "P:unmount", "C:destroy", "P:destroy"])
         expect(parentService.counts).toEqual(ONCE)
         expect(childService.counts).toEqual(ONCE)
     })
 })
+
+
+
+// 6. The linked-but-dead invariant
+// ========================================
+//
+// An INVARIANT, not scenario support. `mount()` refuses a `failed | destroying | destroyed` parent before
+// `addChild`, so a corpse can never take a link. Together with the construction guard at `new`, that makes
+// linked-but-dead unrepresentable through the public API, which is what lets `assertTreeInvariant`'s third
+// rule read "a claimed node has no attached children" rather than the weaker "no MOUNTED children".
+//
+// It is deliberately NOT paired with a check in `useModuleLifecycle`. The hook mounts on `isResting` alone
+// and has no parent test, so a sequence that reaches this state surfaces as a loud throw out of the effect
+// rather than being quietly absorbed. The machine enforces the invariant; the React layer does not paper
+// over it. The one sequence that could produce it — a parent claimed between a child's construction and its
+// mount — needs `<Activity>` or Suspense above a provider, both unsupported by design, so this guard should
+// be unreachable in supported usage. If it ever fires, that is the news.
+//
+// One cell: the invariant itself. The end-to-end scenario is not tested, because the scenario is not
+// supported.
+
+describe("the linked-but-dead invariant", () => {
+    it("refuses mount() onto a parent destroyed after the child was built", async () => {
+        const log: string[] = []
+        const parent = makeApp({ providers: [tracked(log, "P")] })
+        const child = makeChild(parent, { providers: [tracked(log, "C")] })
+
+        // Construction and init both passed against a healthy parent — the child owes nobody an apology.
+        expect(child.status).toBe(ModuleStatus.Initialized)
+
+        await parent.destroy()
+        expect(parent.status).toBe(ModuleStatus.Destroyed)
+
+        expect(() => child.mount()).toThrow(
+            "Cannot mount a module onto a destroyed parent — that branch is spent, so the child could never go live under it. Mount it under a live parent, or rebuild the branch first."
+        )
+
+        // Refused ahead of the attach, so the corpse holds nothing and the child is exactly as it was.
+        expect(parent.children.size).toBe(0)
+        expect(child.status).toBe(ModuleStatus.Initialized)
+        expect(child.status).not.toBe(ModuleStatus.Failed)
+        assertTreeInvariant(parent)
+
+        // Still the caller's to dispose of, and the short path takes it.
+        await child.destroy()
+        expect(log).toEqual(["P:ctor", "P:init", "C:ctor", "C:init", "P:destroy", "C:destroy"])
+    })
+})
+
+/** A promise a test can settle by hand, for parking a module mid-drain. */
+function deferredClaim(): { promise: Promise<void>; resolve: () => void } {
+    let resolve!: () => void
+    const promise = new Promise<void>((settle) => {
+        resolve = settle
+    })
+    return { promise, resolve }
+}

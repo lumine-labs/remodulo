@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest"
 
 import { Container, Scope } from "@remodulo/container"
 import type { Constructor } from "@remodulo/container"
-import type { Provider } from "../../src/core/provider/provider.types.js"
+import type { Provider } from "../../src/core/provider.types.js"
 // One token, one registration per container.
 // ========================================
 //

@@ -2,9 +2,10 @@ import { render } from "@testing-library/react"
 import { describe, expect, it, vi } from "vitest"
 import type { ReactNode } from "react"
 
-import type { Container } from "@remodulo/container"
-import { ModuleProvider } from "../../src/react/providers/ModuleProvider.js"
-import { useContainer } from "../../src/react/hooks/useModuleContext.js"
+import type { Resolver } from "@remodulo/container"
+import type { Module } from "../../src/core/module.js"
+import { ModuleProvider } from "../../src/react/ModuleProvider.js"
+import { useModule, useResolver } from "../../src/react/useModuleContext.js"
 import { Root } from "../setup/react.js"
 import { flush, tracked } from "../setup/helpers.js"
 
@@ -39,16 +40,18 @@ describe("module hooks reach the lifecycle", () => {
         expect(log).toEqual(["init", "mount", "unmount", "destroy"])
     })
 
-    it("hands each hook the module's own container", async () => {
-        const seen: Container[] = []
-        let contextContainer: Container | null = null
+    it("hands each hook the module's own canonical resolver", async () => {
+        const seen: Resolver[] = []
+        let contextResolver: Resolver | null = null
+        let contextModule: Module | null = null
 
         function Probe(): ReactNode {
-            contextContainer = useContainer()
+            contextResolver = useResolver()
+            contextModule = useModule()
             return null
         }
 
-        const record = (container: Container) => seen.push(container)
+        const record = (resolver: Resolver) => seen.push(resolver)
 
         const { unmount } = render(
             <Root>
@@ -68,7 +71,33 @@ describe("module hooks reach the lifecycle", () => {
 
         expect(seen.length).toBe(4)
         expect(new Set(seen).size).toBe(1)
-        expect(seen[0]).toBe(contextContainer)
+        // The canonical `module.resolver`, not a fresh view of the same container.
+        expect(seen[0]).toBe(contextModule!.resolver)
+        expect(contextResolver).toBe(contextModule!.resolver)
+    })
+
+    it("hands the hook a read-only door: there is no `register` to reach", async () => {
+        const seen: Resolver[] = []
+
+        const record = (resolver: Resolver) => {
+            // @ts-expect-error the hook argument is a Resolver — post-init `register()` is the hole this closes.
+            void resolver.register
+            seen.push(resolver)
+        }
+
+        const { unmount } = render(
+            <Root>
+                <ModuleProvider onModuleInit={record}>
+                    <div />
+                </ModuleProvider>
+            </Root>
+        )
+
+        expect(seen.length).toBe(1)
+        expect("register" in seen[0]!).toBe(false)
+
+        unmount()
+        await flush()
     })
 
     it("calls the latest render's function, not the one the module was built with", async () => {

@@ -2,12 +2,13 @@ import { act, render } from "@testing-library/react"
 import { describe, expect, it, vi } from "vitest"
 import { useState, type ReactNode } from "react"
 
-import { Container } from "@remodulo/container"
-import { App, Module } from "../../src/core/module/module.js"
-import { AppProvider } from "../../src/react/providers/AppProvider.js"
-import { ModuleProvider } from "../../src/react/providers/ModuleProvider.js"
-import { useContainer, useModuleContext } from "../../src/react/hooks/useModuleContext.js"
-import type { ModuleContextValue } from "../../src/react/context/ModuleContext.js"
+import { Container, Resolver } from "@remodulo/container"
+import { App, Module } from "../../src/core/module.js"
+import { ModuleStatus } from "../../src/core/module-lifecycle.types.js"
+import { AppProvider } from "../../src/react/AppProvider.js"
+import { ModuleProvider } from "../../src/react/ModuleProvider.js"
+import { useModuleContext, useResolver } from "../../src/react/useModuleContext.js"
+import type { ModuleContextValue } from "../../src/react/ModuleContext.js"
 import { Root } from "../setup/react.js"
 import { flush, tracked } from "../setup/helpers.js"
 
@@ -29,13 +30,13 @@ function silenceReactErrorLog(): () => void {
 describe("AppProvider", () => {
     it("inits an un-initialized app before children render", () => {
         const app = new App({ providers: [{ provide: ROOT_ONLY, useValue: "root-only" }] })
-        expect(app.initialized).toBe(false)
+        expect(app.status).toBe(ModuleStatus.Created)
 
         let resolved: string | null = null
         function Probe(): ReactNode {
             // A scoped child throws at construction if its parent is not initialized, so rendering at all
             // proves the app was inited first.
-            resolved = useContainer().resolve<string>(ROOT_ONLY)
+            resolved = useResolver().resolve<string>(ROOT_ONLY)
             return null
         }
 
@@ -47,7 +48,9 @@ describe("AppProvider", () => {
             </AppProvider>
         )
 
-        expect(app.initialized).toBe(true)
+        // The app is `mounted` by now — the effect ran inside `render` — so this asks the question the old
+        // `initialized` boolean asked: init arrived and the state is not the pre-init one nor the failed one.
+        expect(app.status).not.toBeOneOf([ModuleStatus.Created, ModuleStatus.Failed])
         expect(resolved).toBe("root-only")
     })
 
@@ -58,11 +61,11 @@ describe("AppProvider", () => {
 
         const { unmount } = render(<AppProvider app={app}><div /></AppProvider>)
 
-        expect(app.mounted).toBe(true)
+        expect(app.status).toBe(ModuleStatus.Mounted)
         expect(Service.counts).toMatchObject({ init: 1, mount: 1, unmount: 0 })
 
         unmount()
-        expect(app.mounted).toBe(false)
+        expect(app.status).not.toBe(ModuleStatus.Mounted)
         expect(Service.counts).toMatchObject({ unmount: 1 })
     })
 
@@ -79,11 +82,11 @@ describe("AppProvider", () => {
         // `app.destroy()` for a root provider to see its destroy hook.
         expect(Service.counts).toEqual({ init: 1, mount: 1, unmount: 1, destroy: 1 })
         expect(log).toEqual(["A:ctor", "A:init", "A:mount", "A:unmount", "A:destroy"])
-        expect(app.claimed).toBe(true)
-        expect(app.mounted).toBe(false)
+        expect(app.status).toBeOneOf([ModuleStatus.Destroying, ModuleStatus.Destroyed])
+        expect(app.status).not.toBe(ModuleStatus.Mounted)
     })
 
-    it("is safe to call app.destroy() again after the unmount-driven destroy", async () => {
+    it("absorbs a manual app.destroy() after the unmount-driven destroy", async () => {
         const log: string[] = []
         const Service = tracked(log, "A")
         const app = new App({ providers: [Service] })
@@ -93,9 +96,9 @@ describe("AppProvider", () => {
         await flush()
         log.length = 0
 
-        // MEASURED: `destroy()` short-circuits on the `#destroyed` flag the first pass set synchronously, so
-        // the second call resolves without re-running a single hook. An owner who still calls `destroy()`
-        // out of habit is not punished for it.
+        // An owner calling destroy() out of habit is not punished for it: the claim walk finds the subtree
+        // already spent and the call collapses. Unlike mount() or unmount() on a corpse — both of which
+        // refuse — this caller is asking for a state the App is already in, so it gets it.
         await expect(app.destroy()).resolves.toBeUndefined()
         await flush()
 
@@ -141,7 +144,7 @@ describe("parallel apps", () => {
 
         const seen: string[] = []
         function Probe(): ReactNode {
-            seen.push(useContainer().resolve<string>(SHARED))
+            seen.push(useResolver().resolve<string>(SHARED))
             return null
         }
 
@@ -269,16 +272,16 @@ describe("ModuleProvider — context value", () => {
 })
 
 describe("ModuleProvider — nesting", () => {
-    it("gives a scoped child its own container that reads through to the parent", () => {
-        let parent: Container | null = null
-        let child: Container | null = null
+    it("gives a scoped child its own container, seen through its own resolver, reading through to the parent", () => {
+        let parent: Resolver | null = null
+        let child: Resolver | null = null
 
         function Parent(): ReactNode {
-            parent = useContainer()
+            parent = useResolver()
             return null
         }
         function Child(): ReactNode {
-            child = useContainer()
+            child = useResolver()
             return null
         }
 
@@ -301,7 +304,7 @@ describe("ModuleProvider — nesting", () => {
         const seen: string[] = []
 
         function Probe(): ReactNode {
-            seen.push(useContainer().resolve<string>(SHARED))
+            seen.push(useResolver().resolve<string>(SHARED))
             return null
         }
 

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 
 import { Container } from "../../src/container.js"
 import { ResolveAllMode, Scope } from "../../src/container.types.js"
@@ -343,7 +343,7 @@ describe("observation", () => {
         const container = new Container()
         container.register({ provide: TOKEN, useClass: A, multi: true })
         container.register({ provide: TOKEN, useClass: B, multi: true })
-        container.onResolution<A | B>(TOKEN, (instance) => seen.push(instance.name))
+        container.on("afterMaterialize", ({ instance }) => seen.push((instance as A | B).name))
 
         container.resolveAll(TOKEN)
         container.resolveAll(TOKEN)
@@ -351,18 +351,18 @@ describe("observation", () => {
         expect(seen).toEqual(["a", "b"])
     })
 
-    it("does not observe members registered after the call", () => {
+    it("observes members registered after the hook was attached", () => {
+        // The inversion the container-global registry brings: a hook no longer attaches to the entries a
+        // token happens to have at attach time, so a collection that grows afterwards is observed whole.
         const seen: string[] = []
         const container = new Container()
         container.register({ provide: TOKEN, useValue: "a", multi: true })
-        container.onResolution<string>(TOKEN, (instance) => seen.push(instance))
+        container.on("afterMaterialize", ({ instance }) => seen.push(instance as string))
         container.register({ provide: TOKEN, useValue: "b", multi: true })
 
         container.resolveAll(TOKEN)
 
-        // Documented, and harmless for the module layer above this container: a module registers every
-        // provider in its constructor and only observes during init.
-        expect(seen).toEqual(["a"])
+        expect(seen).toEqual(["a", "b"])
     })
 
     it("reports an ancestor's members to the ancestor only", () => {
@@ -371,42 +371,52 @@ describe("observation", () => {
 
         const parent = new Container()
         parent.register({ provide: TOKEN, useValue: "parent", multi: true })
-        parent.onResolution<string>(TOKEN, (instance) => parentSeen.push(instance))
+        parent.on("afterMaterialize", ({ instance }) => parentSeen.push(instance as string))
 
         const child = parent.fork()
         child.register({ provide: TOKEN, useValue: "child", multi: true })
-        child.onResolution<string>(TOKEN, (instance) => childSeen.push(instance))
+        child.on("afterMaterialize", ({ instance }) => childSeen.push(instance as string))
 
         expect(child.resolveAll(TOKEN)).toEqual(["child", "parent"])
         expect(parentSeen).toEqual(["parent"])
         expect(childSeen).toEqual(["child"])
     })
 
-    it("still refuses a token with no bindings of its own", () => {
+    it("says nothing about a token with no bindings of its own", () => {
+        // There is no attach-time refusal left to make: `on` names no token, so a container that
+        // registered nothing simply reports nothing.
         const container = new Container()
+        const hook = vi.fn()
 
-        expect(() => container.onResolution(TOKEN, () => undefined)).toThrow("Cannot observe PLUGINS")
+        container.on("afterMaterialize", hook)
+
+        expect(container.resolveAll(TOKEN)).toEqual([])
+        expect(hook).not.toHaveBeenCalled()
     })
 
-    it("refuses a collection made entirely of aliases", () => {
-        // Aliases carry no binding of their own: resolving one fires the TARGET's listener, on the
-        // container that registered the target. There is nothing here to attach to.
+    it("reports nothing of its own for a collection made entirely of aliases", () => {
+        // Aliases carry no binding: resolving one materializes the TARGET, on the container that
+        // registered the target. There is nothing of the collection's own to report.
         class Legacy {}
+        const seen: unknown[] = []
 
         const container = new Container()
         container.register(Legacy)
         container.register({ provide: TOKEN, useExisting: Legacy, multi: true })
+        container.on("afterMaterialize", ({ snapshot }) => seen.push(snapshot.token))
 
-        expect(() => container.onResolution(TOKEN, () => undefined)).toThrow("Cannot observe PLUGINS")
+        container.resolveAll(TOKEN)
+
+        expect(seen).toEqual([Legacy])
     })
 
-    // There is one observation door and it takes no filter. The listener's second argument is the same
+    // There is one observation door and it takes no token. A hook's payload carries the same
     // `EntrySnapshot` `entries()` hands out, so an adoption filter is written in exactly the vocabulary the
-    // metadata plane already speaks — just inside the listener rather than beside it.
-    it("a singleton-only listener declines a transient member sharing the token", () => {
+    // metadata plane already speaks — just inside the hook rather than beside it.
+    it("a singleton-only hook declines a transient member sharing the token", () => {
         // The standing invariant this container inherits: transients never participate in lifecycle.
         // Deciding per BINDING rather than per token is what keeps that true inside a collection, and the
-        // snapshot the listener is handed is per binding.
+        // snapshot the hook is handed is per binding.
         class Transient {
             readonly name = "transient"
         }
@@ -420,15 +430,15 @@ describe("observation", () => {
 
         const all: string[] = []
         const everything = mixed()
-        everything.onResolution<{ name: string }>(TOKEN, (instance) => all.push(instance.name))
+        everything.on("afterMaterialize", ({ instance }) => all.push((instance as Transient).name))
 
         const retained: string[] = []
         const offered: string[] = []
         const singletons = mixed()
-        singletons.onResolution<{ name: string }>(TOKEN, (instance, snapshot) => {
-            offered.push(instance.name)
+        singletons.on("afterMaterialize", ({ instance, snapshot }) => {
+            offered.push((instance as Transient).name)
             if (snapshot.scope !== Scope.Singleton) return
-            retained.push(instance.name)
+            retained.push((instance as Transient).name)
         })
 
         for (const container of [everything, singletons]) {
@@ -437,11 +447,11 @@ describe("observation", () => {
             container.resolveAll(TOKEN)
         }
 
-        // `onResolution` reports every construction, transients included.
+        // `afterMaterialize` reports every construction, transients included.
         expect(all).toEqual(["constant", "transient", "transient", "transient"])
 
-        // The filtering listener sees exactly the same stream — attachment no longer depends on scope —
-        // and it is the early return, not the container, that keeps the transient out of the adopted set.
+        // The filtering hook sees exactly the same stream — attachment never depended on scope — and it is
+        // the early return, not the container, that keeps the transient out of the adopted set.
         expect(offered).toEqual(["constant", "transient", "transient", "transient"])
         expect(retained).toEqual(["constant"])
     })
@@ -456,7 +466,7 @@ describe("observation", () => {
         container.register({ provide: TOKEN, useFactory: () => new Transient(), multi: true, scope: Scope.Transient })
 
         // Not an error: a token whose every binding is transient simply retains nothing.
-        container.onResolution(TOKEN, (instance, snapshot) => {
+        container.on("afterMaterialize", ({ instance, snapshot }) => {
             calls += 1
             if (snapshot.scope !== Scope.Singleton) return
             seen.push(instance)
@@ -467,39 +477,32 @@ describe("observation", () => {
         expect(seen).toEqual([])
     })
 
-    it("still refuses a token with no bindings of its own", () => {
-        // Scope decides what a listener adopts; REGISTRATION is still what attaching is refused over.
-        const container = new Container()
-
-        expect(() => container.onResolution(TOKEN, () => undefined)).toThrow("Cannot observe PLUGINS")
-    })
-
-    it("keeps every observer of a binding, notified in attach order", () => {
-        // A binding holds a LIST of listeners rather than one handler, and every `onResolution` appends to
-        // it. That is the whole reason a second observer cannot silently unhook the first — an
-        // implementation that stored one handler per binding would lose all but the last.
+    it("keeps every hook on an event, notified in registration order", () => {
+        // A container holds a LIST per event rather than one handler, and every `on` appends to it. That is
+        // the whole reason a second observer cannot silently unhook the first — an implementation that
+        // stored one handler per event would lose all but the last.
         const order: string[] = []
 
         const container = new Container()
         container.register({ provide: TOKEN, useValue: "v", multi: true })
-        container.onResolution<string>(TOKEN, (instance) => order.push(`first:${instance}`))
-        container.onResolution<string>(TOKEN, (instance) => order.push(`second:${instance}`))
-        container.onResolution<string>(TOKEN, (instance) => order.push(`third:${instance}`))
+        container.on("afterMaterialize", ({ instance }) => order.push(`first:${instance as string}`))
+        container.on("afterMaterialize", ({ instance }) => order.push(`second:${instance as string}`))
+        container.on("afterMaterialize", ({ instance }) => order.push(`third:${instance as string}`))
 
         container.resolveAll(TOKEN)
 
         expect(order).toEqual(["first:v", "second:v", "third:v"])
     })
 
-    it("lets an unfiltered and a self-filtering observation share a binding", () => {
+    it("lets an unfiltered and a self-filtering hook share an event", () => {
         const seen: string[] = []
 
         const container = new Container()
         container.register({ provide: TOKEN, useValue: "v", multi: true })
-        container.onResolution<string>(TOKEN, (instance) => seen.push(`all:${instance}`))
-        container.onResolution<string>(TOKEN, (instance, snapshot) => {
+        container.on("afterMaterialize", ({ instance }) => seen.push(`all:${instance as string}`))
+        container.on("afterMaterialize", ({ instance, snapshot }) => {
             if (snapshot.scope !== Scope.Singleton) return
-            seen.push(`retained:${instance}`)
+            seen.push(`retained:${instance as string}`)
         })
 
         container.resolveAll(TOKEN)
@@ -507,7 +510,7 @@ describe("observation", () => {
         expect(seen).toEqual(["all:v", "retained:v"])
     })
 
-    it("notifies every observer of a transient binding on every construction", () => {
+    it("notifies every hook of a transient binding on every construction", () => {
         class Service {}
 
         const first: number[] = []
@@ -516,8 +519,8 @@ describe("observation", () => {
 
         const container = new Container()
         container.register({ provide: TOKEN, useClass: Service, multi: true, scope: Scope.Transient })
-        container.onResolution(TOKEN, () => first.push(++built))
-        container.onResolution(TOKEN, () => second.push(built))
+        container.on("afterMaterialize", () => first.push(++built))
+        container.on("afterMaterialize", () => second.push(built))
 
         container.resolveAll(TOKEN)
         container.resolveAll(TOKEN)
@@ -526,20 +529,20 @@ describe("observation", () => {
         expect(second).toEqual([1, 2])
     })
 
-    it("observes without intercepting — a listener cannot change what resolve hands out", () => {
+    it("observes without intercepting — a hook cannot change what resolve hands out", () => {
         const original = { name: "original" }
 
         const container = new Container()
         container.register({ provide: TOKEN, useValue: original })
 
-        // The signature says `void`, and the dispatcher returns the original whatever a listener does.
-        container.onResolution(TOKEN, () => ({ name: "replaced" }) as never)
-        container.onResolution(TOKEN, () => undefined)
+        // The listener signature says `void`, and the dispatcher returns the original whatever a hook does.
+        container.on("afterMaterialize", () => ({ name: "replaced" }) as never)
+        container.on("afterResolution", () => undefined)
 
         expect(container.resolve(TOKEN)).toBe(original)
     })
 
-    it("attaches to the non-alias members of a mixed collection", () => {
+    it("reports the non-alias members of a mixed collection", () => {
         const seen: string[] = []
         class Legacy {
             readonly name = "legacy"
@@ -552,7 +555,10 @@ describe("observation", () => {
         container.register(Legacy)
         container.register({ provide: TOKEN, useClass: Direct, multi: true })
         container.register({ provide: TOKEN, useExisting: Legacy, multi: true })
-        container.onResolution<Direct>(TOKEN, (instance) => seen.push(instance.name))
+        container.on("afterMaterialize", ({ instance, snapshot }) => {
+            if (snapshot.token !== TOKEN) return
+            seen.push((instance as Direct).name)
+        })
 
         container.resolveAll(TOKEN)
 
@@ -653,8 +659,8 @@ describe("claim precedence", () => {
 // a surface and the read it names to narrow what it can express. What the `inject` grammar REFUSES is a
 // separate matter, and it is a type-level matter; it is pinned at the bottom of this file.
 //
-// `Resolver` used to be pinned here too, as a third mirror of the same reads. It is not part of this
-// package: it lives in `@remodulo/react`, and its parity block lives with it.
+// `Resolver` is a third mirror of the same reads. It moved into this package with the hook system, and its
+// parity block lives beside it in `tests/container/resolver.test.ts`.
 
 describe("injectAll parity", () => {
     /**

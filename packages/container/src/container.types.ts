@@ -8,7 +8,10 @@ import type { EntryMetadata } from "./providers.types.js"
 
 export type Constructor<T = unknown> = new (...args: any[]) => T
 export type AbstractConstructor<T = unknown> = abstract new (...args: any[]) => T
-export type InjectionToken<T = unknown> = string | symbol | Constructor<T> | AbstractConstructor<T>
+// eslint-disable-next-line @typescript-eslint/no-unsafe-function-type
+export type ClassKey<T = unknown> = Function & { prototype: NoInfer<T> }
+
+export type InjectionToken<T = unknown> = string | symbol | Constructor<T> | AbstractConstructor<T> | ClassKey<T>
 
 // Scope
 // ========================================
@@ -100,9 +103,53 @@ export type AliasEntrySnapshot<T = unknown> = {
 
 export type EntrySnapshot<T = unknown> = BindingEntrySnapshot<T> | AliasEntrySnapshot<T>
 
+// Events
+// ========================================
+
+export const ContainerEvent = Enum({
+    BeforeResolution: "beforeResolution",
+    AfterResolution: "afterResolution",
+    BeforeMaterialize: "beforeMaterialize",
+    AfterMaterialize: "afterMaterialize",
+})
+export type ContainerEvent = Enum<typeof ContainerEvent>
+
+export type BeforeResolutionEvent = {
+    readonly token: InjectionToken
+    readonly mode: ResolveMode | ResolveAllMode
+    /** The entry as spelled. */
+    readonly snapshot: EntrySnapshot
+}
+
+export type AfterResolutionEvent = {
+    readonly instance: unknown
+    readonly mode: ResolveMode | ResolveAllMode
+    readonly snapshot: EntrySnapshot
+}
+
+export type BeforeMaterializeEvent = {
+    readonly token: InjectionToken
+    readonly snapshot: BindingEntrySnapshot
+}
+
+export type AfterMaterializeEvent = {
+    readonly instance: unknown
+    readonly snapshot: BindingEntrySnapshot
+}
+
+export type ContainerEventPayload = {
+    readonly beforeResolution: BeforeResolutionEvent
+    readonly afterResolution: AfterResolutionEvent
+    readonly beforeMaterialize: BeforeMaterializeEvent
+    readonly afterMaterialize: AfterMaterializeEvent
+}
+
+export type ContainerEventListener<E extends ContainerEvent = ContainerEvent> = (
+    event: ContainerEventPayload[E]
+) => void
+
 // Container internals
 // ========================================
-export type EntryListener<T = unknown> = (value: T, snapshot: BindingEntrySnapshot<T>) => void
 
 export type EntrySource =
     | { kind: "class"; implementation: Constructor<unknown> }
@@ -116,7 +163,6 @@ export type Entry = {
     readonly scope: Scope
     readonly multi: boolean
     readonly metadata?: EntryMetadata
-    listeners?: EntryListener[]
     /** Present once a singleton (or a constant) has produced its instance. */
     cache?: { value: unknown }
 }
@@ -124,3 +170,6 @@ export type Entry = {
 export type Resolution = { readonly request: RequestCache; readonly chain: readonly InjectionToken[] }
 
 export type Found = { owner: Container; entry: Entry }
+
+/** The binding an alias walk landed on, with the resolution the walk's own tokens have joined. */
+export type Landing = Found & { readonly context: Resolution }

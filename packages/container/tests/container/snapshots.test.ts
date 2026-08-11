@@ -316,10 +316,10 @@ describe("snapshot immutability", () => {
         expect(container.entries(MULTI)[0]).not.toBe(member)
     })
 
-    it("cannot be used to reach the implementation, the listeners or the cache", () => {
+    it("cannot be used to reach the implementation or the cache", () => {
         const container = new Container()
         container.register({ provide: TOKEN, useClass: Service })
-        container.onResolution(TOKEN, () => {})
+        container.on("afterMaterialize", () => {})
         container.resolve(TOKEN)
 
         expect(Object.keys(container.entry(TOKEN) as object).sort()).toEqual([

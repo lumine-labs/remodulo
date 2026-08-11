@@ -2,10 +2,11 @@ import { act, render } from "@testing-library/react"
 import { describe, expect, it } from "vitest"
 import { Suspense, startTransition, use, useState, type ReactNode } from "react"
 
-import type { Module } from "../../src/core/module/module.js"
-import { ModuleProvider } from "../../src/react/providers/ModuleProvider.js"
-import { useModuleContext, useModuleRebuild } from "../../src/react/hooks/useModuleContext.js"
-import { useResolve } from "../../src/react/hooks/useResolve.js"
+import type { Module } from "../../src/core/module.js"
+import { ModuleStatus } from "../../src/core/module-lifecycle.types.js"
+import { ModuleProvider } from "../../src/react/ModuleProvider.js"
+import { useModuleContext, useModuleRebuild } from "../../src/react/useModuleContext.js"
+import { useResolve } from "../../src/react/useResolve.js"
 import type { Provider } from "../../src/types.js"
 import { Root } from "../setup/react.js"
 import { flush, type HookCounts } from "../setup/helpers.js"
@@ -118,7 +119,7 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
 // ========================================
 
 describe("a transition that only moves props", () => {
-    it("cascades through the module's children with zero lifecycle events", async () => {
+    it("re-renders the module's React subtree with zero lifecycle events", async () => {
         const log: string[] = []
         const service = generational(log, "S")
         const modules: Module[] = []
@@ -192,10 +193,10 @@ describe("a transition that only moves props", () => {
     })
 })
 
-// rebuildOn inside a transition
+// deps inside a transition
 // ========================================
 
-describe("a rebuildOn dep that changes inside a transition", () => {
+describe("a deps dep that changes inside a transition", () => {
     it("rebuilds with exactly the ordering contract of a synchronous dep change", async () => {
         const log: string[] = []
         const service = generational(log, "S")
@@ -207,7 +208,7 @@ describe("a rebuildOn dep that changes inside a transition", () => {
             move = (next) => startTransition(() => setDep(next))
             return (
                 <Root>
-                    <ModuleProvider providers={[service.provider]} rebuildOn={[dep]}>
+                    <ModuleProvider providers={[service.provider]} deps={[dep]}>
                         <ModuleProbe into={modules} />
                         <span data-testid="dep">{dep}</span>
                     </ModuleProvider>
@@ -222,11 +223,11 @@ describe("a rebuildOn dep that changes inside a transition", () => {
         await flush()
 
         // MEASURED — identical to the non-transition contract in `rebuild.test.tsx`: the replacement is
-        // built and inited first, the outgoing generation is then buried, and only then does the new one
-        // mount. Nothing about the transition changes it, because the rebuild is not triggered by RENDER:
-        // it is triggered by ModuleProvider's layout effect, which only runs once the transition commits.
+        // built and inited first, the outgoing generation is retired, the new one mounts, and the deferred
+        // destroy lands last. Nothing about the transition changes it, because the rebuild is not triggered
+        // by RENDER: it is triggered by ModuleProvider's layout effect, which runs once the transition commits.
         expect(getByTestId("dep").textContent).toBe("1")
-        expect(log).toEqual(["S#2:ctor", "S#2:init", "S#1:unmount", "S#1:destroy", "S#2:mount"])
+        expect(log).toEqual(["S#2:ctor", "S#2:init", "S#1:unmount", "S#2:mount", "S#1:destroy"])
         expect(counts(service)).toEqual([BURIED, LIVE])
         expect(modules.length).toBe(2)
     })
@@ -249,7 +250,7 @@ describe("a rebuildOn dep that changes inside a transition", () => {
             return (
                 <Root>
                     <Suspense fallback={<span data-testid="fallback">…</span>}>
-                        <ModuleProvider providers={[service.provider]} rebuildOn={[dep]}>
+                        <ModuleProvider providers={[service.provider]} deps={[dep]}>
                             <ModuleProbe into={modules} />
                             <Gated dep={dep} />
                         </ModuleProvider>
@@ -265,7 +266,7 @@ describe("a rebuildOn dep that changes inside a transition", () => {
 
         // ==================== MEASURED — the answer to "does the rebuild defer?" ====================
         //
-        // Yes, and cleanly. The dep has changed in the RENDER that is suspended, but `prevRebuildOnRef` is
+        // Yes, and cleanly. The dep has changed in the RENDER that is suspended, but `prevDepsRef` is
         // only advanced by a layout effect, and layout effects belong to the commit — which has not
         // happened. So while the transition is pending the module is untouched: no rebuild, no extra
         // generation, and the boundary keeps showing the already-committed content rather than a fallback.
@@ -285,7 +286,7 @@ describe("a rebuildOn dep that changes inside a transition", () => {
         // structural difference from module CONSTRUCTION (which lives in the render phase and therefore
         // does replay per attempt — see the discard-zone tests below).
         expect(getByTestId("dep").textContent).toBe("1")
-        expect(log).toEqual(["S#2:ctor", "S#2:init", "S#1:unmount", "S#1:destroy", "S#2:mount"])
+        expect(log).toEqual(["S#2:ctor", "S#2:init", "S#1:unmount", "S#2:mount", "S#1:destroy"])
         expect(counts(service)).toEqual([BURIED, LIVE])
         expect(modules.length).toBe(2)
     })
@@ -415,8 +416,8 @@ describe("a transition into a subtree that suspends", () => {
             "Detail#2:ctor",
             "Detail#2:init",
             "List#1:unmount",
-            "List#1:destroy",
             "Detail#2:mount",
+            "List#1:destroy",
         ])
         expect(counts(detail)).toEqual([ABANDONED, LIVE])
         expect(counts(list)).toEqual([BURIED])
@@ -479,8 +480,8 @@ describe("the committed tree while a transition is suspended", () => {
 
         // The transition is pending: the old UI is still the committed one, and it is still LIVE.
         expect(getByTestId("tick")).toBeInTheDocument()
-        expect(committed.mounted).toBe(true)
-        expect(committed.claimed).toBe(false)
+        expect(committed.status).toBe(ModuleStatus.Mounted)
+        expect(committed.status).not.toBeOneOf([ModuleStatus.Destroying, ModuleStatus.Destroyed])
 
         // A synchronous update to the old tree still renders against the old generation — same module,
         // same resolved instance, no new resolution.
@@ -548,22 +549,26 @@ describe("an imperative rebuild while a transition is pending", () => {
         // the pending transition and it does not interleave with it either. Each one is a complete
         // generation swap in the documented order, and the sequence settles on exactly one live generation
         // with every earlier one fully buried — the rapid-rebuild invariant survives transition pressure.
-        expect(log).toEqual([
+        //
+        // The deferred destroys are asserted APART from that sequence, and deliberately: where a scheduled
+        // destroy lands relative to the React work that follows it is not fixed under real timers — an act
+        // that yields to the macrotask queue lets the timer in early. What IS fixed is that each generation
+        // gets exactly one destroy, in the order the cleanups scheduled them.
+        expect(log.filter((entry) => !entry.endsWith(":destroy"))).toEqual([
             "S#2:ctor",
             "S#2:init",
             "S#1:unmount",
-            "S#1:destroy",
             "S#2:mount",
             "S#3:ctor",
             "S#3:init",
             "S#2:unmount",
-            "S#2:destroy",
             "S#3:mount",
         ])
+        expect(log.filter((entry) => entry.endsWith(":destroy"))).toEqual(["S#1:destroy", "S#2:destroy"])
         expect(counts(service)).toEqual([BURIED, BURIED, LIVE])
         expect(modules.length).toBe(3)
-        expect(modules.at(-1)?.mounted).toBe(true)
-        expect(modules.at(-1)?.claimed).toBe(false)
+        expect(modules.at(-1)?.status).toBe(ModuleStatus.Mounted)
+        expect(modules.at(-1)?.status).not.toBeOneOf([ModuleStatus.Destroying, ModuleStatus.Destroyed])
 
         // And the transition it was fired under still lands.
         expect(getByTestId("leaf").textContent).toBe("late")

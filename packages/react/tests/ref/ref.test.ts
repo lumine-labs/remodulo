@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 
 import { Container } from "@remodulo/container"
-import { Ref, RefMap } from "../../src/core/providers/ref/ref.provider.js"
+import { Ref, RefMap } from "../../src/primitives/ref.js"
 
 // Element holders
 // ========================================

@@ -1,4 +1,5 @@
-import { App, Module, type ModuleParams } from "../../src/core/module/module.js"
+import { App, Module } from "../../src/core/module.js"
+import type { ModuleParams } from "../../src/core/module.types.js"
 import type { Provider } from "../../src/types.js"
 
 // Shared test helpers
@@ -28,6 +29,34 @@ export function makeChild(parent: Module, params?: ModuleParams): Module {
     const child = new Module(parent, params)
     child.init()
     return child
+}
+
+// Gate refusals
+// ========================================
+
+/**
+ * The refusal a phase gate throws, matched WHOLE: which signal was sent, the status it was sent from, and
+ * the remedy tail naming what that gate does accept. Every phase is a THROW now — a module no longer
+ * collapses a signal it cannot serve — so this is the single most repeated assertion in the suite, and
+ * matching only the first half let a gate silently change what it advertises without a cell noticing.
+ */
+/** What each gate says it accepts, mirroring the `expected` array the phase method passes to `wrongStatus`. */
+const ACCEPTED: Record<Signal, readonly string[]> = {
+    init: ["created"],
+    mount: ["initialized", "unmounted"],
+    unmount: ["mounted"],
+    destroy: ["created", "initialized", "unmounted", "failed"],
+}
+
+type Signal = "init" | "mount" | "unmount" | "destroy"
+
+export function refuses(signal: Signal, status: string): RegExp {
+    const accepted = ACCEPTED[signal].map((state) => `"${state}"`).join(" or ")
+    return new RegExp(escapeRegExp(`Cannot ${signal}() a module whose status is "${status}" — ${signal}() accepts ${accepted}.`))
+}
+
+function escapeRegExp(value: string): string {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 }
 
 export type HookCounts = { init: number; mount: number; unmount: number; destroy: number }

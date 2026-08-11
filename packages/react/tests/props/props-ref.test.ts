@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest"
 
-import { PropsRef, type PropsAdapter } from "../../src/core/providers/props-ref/props-ref.provider.js"
+import { PropsRef, type PropsAdapter } from "../../src/primitives/props-ref.js"
 
 // `PropsRef` on its own — no React, no container. Everything the hook and `createModuleComponent` rely on is
 // decided here: what `current` returns, when subscribers fire, and what an update that changes nothing

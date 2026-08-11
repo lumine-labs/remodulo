@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 
+import { ModuleStatus } from "../../src/core/module-lifecycle.types.js"
 import { makeApp, makeChild, tracked } from "../setup/helpers.js"
 
 // Hook errors.
@@ -94,7 +95,7 @@ describe("throwing phases", () => {
         // Unmount walks in reverse and is fail-safe: C runs, B throws, A still runs.
         expect(() => module.unmount()).toThrow(AggregateError)
         expect([first.counts.unmount, last.counts.unmount]).toEqual([1, 1])
-        expect(module.mounted).toBe(false)
+        expect(module.status).not.toBe(ModuleStatus.Mounted)
     })
 
     it("carries every failure in the aggregate, in the order they were raised", () => {

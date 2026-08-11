@@ -1,7 +1,8 @@
 import { useState, type JSX, type ReactNode } from "react"
 
-import { App, type ModuleParams } from "../../src/core/module/module.js"
-import { AppProvider } from "../../src/react/providers/AppProvider.js"
+import { App } from "../../src/core/module.js"
+import type { ModuleParams } from "../../src/core/module.types.js"
+import { AppProvider } from "../../src/react/AppProvider.js"
 import type { Provider } from "../../src/types.js"
 
 // React test helpers

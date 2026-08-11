@@ -10,9 +10,9 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest"
 // ========================================
 //
 // `stripInternal` in tsconfig.build.json is what keeps `@internal` members out of the emitted `.d.ts`, and
-// a flag nobody checks is a flag that gets dropped in a config tidy-up. Nothing on the public class carries
-// the tag any more — `onPredicateResolution` was the last one; it merged into `onResolution` as an optional
-// predicate and the predicate has since gone entirely. What still carries it is `frame.ts`'s
+// a flag nobody checks is a flag that gets dropped in a config tidy-up. Nothing on the public classes
+// carries the tag any more — `onPredicateResolution` was the last one, and the whole `onResolution` door it
+// belonged to has since been replaced by `on`. What still carries it is `frame.ts`'s
 // `activeFrame`/`runInFrame`, so those two are what the flag is pinned by now. This compiles the real build
 // config into a throwaway directory and reads
 // the declarations it produced, so the pin costs nothing that `pnpm run build` does not already do.
@@ -43,13 +43,142 @@ afterAll(() => {
 })
 
 describe("emitted declarations", () => {
-    it("publishes one observation door, and it takes exactly two parameters", () => {
-        // The whole signature, because the arity is the point: there is no attach-time filter beside the
-        // listener, and the listener's second argument is the entry's snapshot — which is what makes
-        // filtering inside the listener the equivalent it is.
+    it("publishes one observation door, and it names no token", () => {
+        // The whole signature, because every part of it is load-bearing: the event is a type parameter, so
+        // the payload narrows to the event a consumer named; there is no token beside it, because
+        // registration is container-global and filtering is the hook's own job; and the return is the
+        // disposer, which is the only handle on a hook there is.
         expect(declaration("container.d.ts")).toContain(
-            "onResolution<T>(token: InjectionToken<T>, onResolved: (value: T, snapshot: BindingEntrySnapshot<T>) => void): void;"
+            "on<E extends ContainerEvent>(event: E, listener: ContainerEventListener<E>): () => void;"
         )
+    })
+
+    it("has no onResolution and no notObservable left anywhere", () => {
+        // The per-entry listener plumbing and the attach-time refusal that went with it are gone from the
+        // SOURCE, not hidden behind `stripInternal` — an observation door that does not exist cannot drift
+        // back into the published surface through a config change.
+        const container = readFileSync(join(packageRoot, "src", "container.ts"), "utf8")
+        const errors = readFileSync(join(packageRoot, "src", "container.errors.ts"), "utf8")
+
+        expect(container).not.toContain("onResolution")
+        expect(container).not.toContain("notObservable")
+        expect(errors).not.toContain("notObservable")
+
+        for (const file of ["container.d.ts", "container.errors.d.ts", "index.d.ts", "types.d.ts"]) {
+            expect(declaration(file)).not.toContain("onResolution")
+            expect(declaration(file)).not.toContain("notObservable")
+        }
+    })
+
+    it("publishes the token union with its class-key arm, and keeps building on `Constructor`", () => {
+        // Both halves of the split, because each is only meaningful against the other: a class is a legal
+        // KEY whether or not it can be built, and an ILLEGAL implementation unless it can.
+        const containerTypes = declaration("container.types.d.ts")
+
+        expect(containerTypes).toContain(
+            "export type InjectionToken<T = unknown> = string | symbol | Constructor<T> | AbstractConstructor<T> | ClassKey<T>;"
+        )
+        // `NoInfer` is part of the published contract, not an implementation detail: dropping it is what
+        // turns a generic class token from `Box<unknown>` into `Box<any>` at every consumer call site.
+        expect(containerTypes).toContain("export type ClassKey<T = unknown> = Function & {")
+        expect(containerTypes).toContain("prototype: NoInfer<T>;")
+        expect(declaration("types.d.ts")).toContain("ClassKey")
+
+        // The three doors that construct, all still spelled with `Constructor`.
+        expect(declaration("providers.types.d.ts")).toContain("useClass: Constructor<T>;")
+        expect(declaration("providers.types.d.ts")).toContain("export type Provider<T = any> = Constructor<T> |")
+        expect(declaration("container.d.ts")).toContain("construct<T>(cls: Constructor<T>): T;")
+    })
+
+    it("publishes a resolution pair of one shape, wide-snapshotted, and a narrow materialization pair", () => {
+        // The split a consumer compiles against. The resolution pair agrees on `mode` and `snapshot` and
+        // differs only in token-vs-instance; its snapshot is the WIDE union because an alias read reports
+        // the alias, and it is NON-OPTIONAL on both halves, because an announcement only ever happens where
+        // an entry landed. The materialization pair stays narrow, because an alias never materializes.
+        const containerTypes = declaration("container.types.d.ts")
+
+        for (const published of [
+            "readonly token: InjectionToken;\n    readonly mode: ResolveMode | ResolveAllMode;",
+            "readonly instance: unknown;\n    readonly mode: ResolveMode | ResolveAllMode;\n    readonly snapshot: EntrySnapshot;",
+        ]) {
+            expect(containerTypes).toContain(published)
+        }
+        expect(containerTypes).not.toContain("EntrySnapshot | undefined")
+
+        for (const wide of ["BeforeResolutionEvent", "AfterResolutionEvent"]) {
+            const declared = containerTypes.slice(containerTypes.indexOf(`export type ${wide}`))
+            expect(declared.slice(0, declared.indexOf("};"))).toContain("readonly snapshot: EntrySnapshot;")
+        }
+
+        for (const narrow of ["BeforeMaterializeEvent", "AfterMaterializeEvent"]) {
+            const declared = containerTypes.slice(containerTypes.indexOf(`export type ${narrow}`))
+            expect(declared.slice(0, declared.indexOf("};"))).toContain("readonly snapshot: BindingEntrySnapshot;")
+        }
+    })
+
+    it("publishes the event names as a value and the four payloads as types", () => {
+        // Both halves are needed by a consumer: the names as a value, because a hook is attached by naming
+        // one, and the payloads as types, because a named handler has to be able to spell its parameter.
+        expect(declaration("container.types.d.ts")).toContain("export declare const ContainerEvent")
+        expect(declaration("index.d.ts")).toContain("ContainerEvent")
+
+        const types = declaration("types.d.ts")
+        for (const published of [
+            "ContainerEvent",
+            "ContainerEventListener",
+            "ContainerEventPayload",
+            "BeforeResolutionEvent",
+            "AfterResolutionEvent",
+            "BeforeMaterializeEvent",
+            "AfterMaterializeEvent",
+        ]) {
+            expect(types).toContain(published)
+        }
+    })
+
+    it("publishes the Resolver with the reads and `on`, and with no write door", () => {
+        const resolver = declaration("resolver.d.ts")
+
+        expect(declaration("index.d.ts")).toContain('export { Resolver } from "./resolver.js"')
+
+        // The canonical accessor is the ONLY published way to reach one, and the container names it
+        // nowhere: `createResolver()` is gone and the constructor is private, so a consumer has exactly one
+        // door. The emitted `private constructor()` is what enforces that off the declarations — it takes
+        // no parameters there, because a private constructor's signature is not a consumer's business.
+        expect(resolver).toContain("static for(container: Container): Resolver;")
+        expect(resolver).toContain("private constructor();")
+        expect(declaration("container.d.ts")).not.toContain("createResolver")
+        expect(declaration("container.d.ts")).not.toContain("Resolver")
+
+        // The read surface is the container's, spelled the container's way — same names, same optional
+        // mode parameters. A rename or a dropped mode here is a divergence no runtime test would catch,
+        // because a resolver that delegates still delegates.
+        for (const published of [
+            "resolve<T>(token: InjectionToken<T>, mode?: ResolveMode): T;",
+            "resolveOptional<T>(token: InjectionToken<T>, mode?: ResolveMode): T | undefined;",
+            "resolveOr<T, F>(token: InjectionToken<T>, fallback: () => F, mode?: ResolveMode): T | F;",
+            "resolveOr<T, F>(token: InjectionToken<T>, fallback: F, mode?: ResolveMode): T | F;",
+            "resolveAll<T>(token: InjectionToken<T>, mode?: ResolveAllMode): T[];",
+            "isRegistered(token: InjectionToken, mode?: RegistrationMode): boolean;",
+            "registrations(): readonly EntrySnapshot[];",
+            "entry(token: InjectionToken): EntrySnapshot | undefined;",
+            "entries(token: InjectionToken): readonly EntrySnapshot[];",
+            "on<E extends ContainerEvent>(event: E, listener: ContainerEventListener<E>): () => void;",
+        ]) {
+            expect(resolver).toContain(published)
+        }
+
+        // The container's three write doors, spelled as the container publishes them — the prose above
+        // names all three, so the absent form has to be the declaration rather than the word.
+        const container = declaration("container.d.ts")
+        for (const absent of [
+            "register(provider: Provider | Provider[]): void;",
+            "fork(): Container;",
+            "construct<T>(cls: Constructor<T>): T;",
+        ]) {
+            expect(container).toContain(absent)
+            expect(resolver).not.toContain(absent)
+        }
     })
 
     it("has no onPredicateResolution left to strip", () => {
@@ -68,9 +197,24 @@ describe("emitted declarations", () => {
 
         expect(frame).not.toContain("activeFrame")
         expect(frame).not.toContain("runInFrame")
-        for (const exported of ["inject", "injectOptional", "injectAll", "injectContainer", "runInInjectionContext"]) {
+        for (const exported of [
+            "inject",
+            "injectOptional",
+            "injectAll",
+            "injectContainer",
+            "injectResolver",
+            "runInInjectionContext",
+        ]) {
             expect(injector).toContain(`declare function ${exported}`)
         }
+    })
+
+    it("publishes injectResolver as a no-argument reader returning the Resolver", () => {
+        // Same shape as `injectContainer` and for the same reason — the frame's anchor is not something a
+        // caller selects — and the return type is the difference between the two doors: the read-and-observe
+        // surface rather than the container, so nothing that takes one can register through it.
+        expect(declaration("injector.d.ts")).toContain("declare function injectResolver(): Resolver;")
+        expect(declaration("index.d.ts")).toContain("injectResolver")
     })
 
     it("publishes injectContainer as a no-argument reader returning the Container itself", () => {
@@ -87,11 +231,11 @@ describe("emitted declarations", () => {
         expect(declaration("types.d.ts")).toContain("InjectionToken")
     })
 
-    it("no longer publishes the feature and resolver surface", () => {
+    it("no longer publishes the feature surface", () => {
         const index = declaration("index.d.ts")
         const types = declaration("types.d.ts")
 
-        for (const gone of ["Resolver", "createFeature", "flattenProviders"]) expect(index).not.toContain(gone)
+        for (const gone of ["createFeature", "flattenProviders"]) expect(index).not.toContain(gone)
         for (const gone of ["Feature", "ProviderInput"]) expect(types).not.toContain(gone)
     })
 
@@ -101,8 +245,8 @@ describe("emitted declarations", () => {
         const types = declaration("types.d.ts")
 
         // The union AND both arms are published, because the arms are not an implementation detail of it:
-        // `onResolution`'s listener is declared over `BindingEntrySnapshot`, so a consumer writing a named
-        // listener instead of an inline arrow has to be able to spell the parameter's type.
+        // the materialization payloads are declared over `BindingEntrySnapshot`, so a consumer writing a
+        // named hook instead of an inline arrow has to be able to spell the parameter's type.
         expect(containerTypes).toContain("export type EntrySnapshot")
         expect(containerTypes).toContain("export type BindingEntrySnapshot")
         expect(containerTypes).toContain("export type AliasEntrySnapshot")
@@ -126,17 +270,16 @@ describe("emitted declarations", () => {
     })
 
     it("keeps the container's internal types off both entry points", () => {
-        // `Entry`, `EntrySource`, `EntryListener`, `Resolution` and `Found` moved out of `container.ts` into
+        // `Entry`, `EntrySource`, `Resolution` and `Found` moved out of `container.ts` into
         // `container.types.ts`, so that file carries behaviour and this one carries shape. They are
         // `export`ed there for that one importer, and `container.types.d.ts` therefore names them — which is
         // consumer-unreachable, because `package.json#exports` publishes `.` and `./types` and NOTHING else.
         // So the claim worth pinning is per entry point, not per file.
         //
-        // Word-boundary matches, because `EntrySnapshot`, `BindingEntrySnapshot`, `EntryListener` and
-        // `RegistrationMode` all legitimately contain these as substrings. `Registration` rides along: it
-        // was the old snapshot type `EntrySnapshot` replaced, and two shapes for one thing is what the
-        // collapse removed.
-        const internals = ["Entry", "EntrySource", "EntryListener", "Resolution", "Found", "Registration"]
+        // Word-boundary matches, because `EntrySnapshot`, `BindingEntrySnapshot` and `RegistrationMode` all
+        // legitimately contain these as substrings. `Registration` rides along: it was the old snapshot type
+        // `EntrySnapshot` replaced, and two shapes for one thing is what the collapse removed.
+        const internals = ["Entry", "EntrySource", "EntryListener", "Resolution", "Found", "Landing", "Registration"]
 
         for (const file of ["types.d.ts", "index.d.ts"]) {
             for (const internal of internals) {
@@ -146,7 +289,7 @@ describe("emitted declarations", () => {
 
         // The counterweight: they really did move, rather than being deleted or left behind in `container.ts`.
         const containerTypes = declaration("container.types.d.ts")
-        for (const internal of ["Entry", "EntrySource", "EntryListener", "Resolution", "Found"]) {
+        for (const internal of ["Entry", "EntrySource", "Resolution", "Found", "Landing"]) {
             expect(containerTypes).toMatch(new RegExp(`export type ${internal}\\b`))
         }
         expect(declaration("container.d.ts")).not.toMatch(/\bEntry\b/)

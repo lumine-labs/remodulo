@@ -1,6 +1,7 @@
 import type { Container } from "./container.js"
 import type { InjectionToken, ResolveAllMode, ResolveMode } from "./container.types.js"
 import type { Frame } from "./frame.types.js"
+import { Resolver } from "./resolver.js"
 import { activeFrame, runInFrame } from "./frame.js"
 import { InjectionContextError, notInInjectionContext } from "./injector.errors.js"
 
@@ -31,6 +32,11 @@ export function injectAll<T>(token: InjectionToken<T>, mode: ResolveAllMode = "c
 /** The declaring container itself, for the rare consumer that needs the container and not a value. */
 export function injectContainer(): Container {
     return requireFrame("injectContainer").container
+}
+
+/** The declaring container's canonical resolver: the reads and `on`, without the registration door. */
+export function injectResolver(): Resolver {
+    return Resolver.for(requireFrame("injectResolver").container)
 }
 
 /**

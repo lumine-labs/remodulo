@@ -3,12 +3,13 @@ import { fireEvent, render } from "@testing-library/react"
 import type { ReactNode } from "react"
 
 import { inject } from "@remodulo/container"
-import type { Provider } from "../../src/core/provider/provider.types.js"
-import { Module } from "../../src/core/module/module.js"
-import { useModuleContext } from "../../src/react/hooks/useModuleContext.js"
-import { ModuleProvider } from "../../src/react/providers/ModuleProvider.js"
+import type { Provider } from "../../src/core/provider.types.js"
+import { Module } from "../../src/core/module.js"
+import { useModuleContext } from "../../src/react/useModuleContext.js"
+import { ModuleProvider } from "../../src/react/ModuleProvider.js"
 import type { HookCounts } from "../setup/helpers.js"
 import { flush, makeApp, makeChild, phase, tracked } from "../setup/helpers.js"
+import { assertTreeInvariant } from "../setup/invariants.js"
 import { Root } from "../setup/react.js"
 
 // Ordering torture.
@@ -72,13 +73,17 @@ describe("module tree ordering", () => {
         grandchild.mount()
         child.mount()
         app.mount()
+        assertTreeInvariant(app)
+
         app.unmount()
+        assertTreeInvariant(app)
         log.length = 0
 
         await app.destroy()
 
         expect(log).toEqual(["G:destroy", "C:destroy", "P:destroy"])
         expect([root.counts, middle.counts, leaf.counts]).toEqual([ONCE, ONCE, ONCE])
+        assertTreeInvariant(app)
     })
 })
 
@@ -227,14 +232,15 @@ describe("lazy timing", () => {
 
         fireEvent.click(getByRole("button"))
 
-        expect(log).toEqual(["L:ctor", "L:init"])
-        expect(lazyService.counts.mount).toBe(0)
+        // The click lands well after the module mounted, so the catch-up runs both phases on arrival.
+        expect(log).toEqual(["L:ctor", "L:init", "L:mount"])
+        expect(lazyService.counts.mount).toBe(1)
 
         log.length = 0
         unmount()
         await flush()
 
         expect(log).toEqual(["L:unmount", "L:destroy"])
-        expect(lazyService.counts).toEqual({ init: 1, mount: 0, unmount: 1, destroy: 1 })
+        expect(lazyService.counts).toEqual({ init: 1, mount: 1, unmount: 1, destroy: 1 })
     })
 })

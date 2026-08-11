@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, it } from "vitest"
 
-import { App, Module } from "../../src/core/module/module.js"
-import { PropsRef } from "../../src/core/providers/props-ref/props-ref.provider.js"
+import { App, Module } from "../../src/core/module.js"
+import { PropsRef } from "../../src/primitives/props-ref.js"
 import { EAGER, exercise, makeProviders } from "./fixtures.js"
 import { HeapTrend, LeakTracker, assertGcEnabled, forceGc, scrub, settle } from "./gc.js"
 

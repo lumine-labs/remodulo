@@ -2,10 +2,10 @@ import { describe, expect, it, vi } from "vitest"
 import { render } from "@testing-library/react"
 import type { ReactNode } from "react"
 
-import type { Provider } from "../../src/core/provider/provider.types.js"
-import { ModuleProvider } from "../../src/react/providers/ModuleProvider.js"
-import { useResolve } from "../../src/react/hooks/useResolve.js"
-import { useModuleContext } from "../../src/react/hooks/useModuleContext.js"
+import type { Provider } from "../../src/core/provider.types.js"
+import { ModuleProvider } from "../../src/react/ModuleProvider.js"
+import { useResolve } from "../../src/react/useResolve.js"
+import { useModuleContext } from "../../src/react/useModuleContext.js"
 import { Root, svc } from "../setup/react.js"
 import { flush } from "../setup/helpers.js"
 
@@ -159,7 +159,7 @@ describe("lifecycle through React", () => {
                 </ModuleProvider>
             </Root>
         )
-        expect(log).toEqual(["L:init"])
+        expect(log).toEqual(["L:init", "L:mount"])
 
         log.length = 0
         unmount()

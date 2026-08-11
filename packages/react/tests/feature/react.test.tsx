@@ -1,10 +1,10 @@
 import { render, screen } from "@testing-library/react"
 import { describe, expect, it } from "vitest"
 
-import type { Provider } from "../../src/core/provider/provider.types.js"
-import { createFeature } from "../../src/core/feature/feature.js"
-import { createModuleComponent } from "../../src/react/factories/createModuleComponent.js"
-import { useResolveAll } from "../../src/react/hooks/useResolveAll.js"
+import type { Provider } from "../../src/core/provider.types.js"
+import { createFeature } from "../../src/core/feature.js"
+import { createModuleComponent } from "../../src/react/createModuleComponent.js"
+import { useResolveAll } from "../../src/react/useResolveAll.js"
 import { Root } from "../setup/react.js"
 
 // A feature reaches the React path through the same params object a provider does.

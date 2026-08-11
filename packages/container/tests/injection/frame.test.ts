@@ -513,15 +513,14 @@ describe("observation sees frame-built instances", () => {
 
         const container = new Container()
         container.register([Dependency, Dependent])
-        container.onResolution(Dependent, () => order.push("Dependent"))
-        container.onResolution(Dependency, () => order.push("Dependency"))
+        container.on("afterMaterialize", ({ snapshot }) => order.push((snapshot.token as { name: string }).name))
 
         container.resolve(Dependent)
 
         expect(order).toEqual(["Dependency", "Dependent"])
     })
 
-    it("does not let a listener replace what the injection site receives", () => {
+    it("does not let a hook replace what the injection site receives", () => {
         class Dependency {}
         class Dependent {
             readonly dependency = inject(Dependency)
@@ -530,7 +529,9 @@ describe("observation sees frame-built instances", () => {
         const container = new Container()
         container.register([Dependency, Dependent])
         const replace = vi.fn(() => ({ replaced: true }) as never)
-        container.onResolution(Dependency, replace)
+        container.on("afterMaterialize", ({ snapshot }) => {
+            if (snapshot.token === Dependency) replace()
+        })
 
         expect(container.resolve(Dependent).dependency).toBeInstanceOf(Dependency)
         expect(replace).toHaveBeenCalledTimes(1)

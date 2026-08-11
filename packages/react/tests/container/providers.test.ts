@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest"
 
 import { Container, Scope, inject, injectOptional } from "@remodulo/container"
-import type { Provider } from "../../src/core/provider/provider.types.js"
+import type { Provider } from "../../src/core/provider.types.js"
 import { makeApp } from "../setup/helpers.js"
 
 // The five provider shapes and the two scopes.
@@ -301,7 +301,7 @@ describe("useClass without `provide`", () => {
 
         const container = new Container()
         container.register({ useClass: Service })
-        container.onResolution(Service, (instance) => seen.push(instance))
+        container.on("afterMaterialize", ({ instance }) => seen.push(instance))
 
         expect(seen).toEqual([container.resolve(Service)])
     })

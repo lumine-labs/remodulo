@@ -3,12 +3,11 @@ import { describe, expect, it } from "vitest"
 import { useState, type ReactNode } from "react"
 
 import { injectAll } from "@remodulo/container"
-import type { Provider } from "../../src/core/provider/provider.types.js"
-import { Resolver } from "../../src/core/providers/resolver/resolver.provider.js"
-import { ModuleProvider } from "../../src/react/providers/ModuleProvider.js"
-import { useContainer, useModuleRebuild } from "../../src/react/hooks/useModuleContext.js"
-import { useResolve } from "../../src/react/hooks/useResolve.js"
-import { useResolveAll } from "../../src/react/hooks/useResolveAll.js"
+import type { Provider } from "../../src/core/provider.types.js"
+import { ModuleProvider } from "../../src/react/ModuleProvider.js"
+import { useModule, useModuleRebuild, useResolver } from "../../src/react/useModuleContext.js"
+import { useResolve } from "../../src/react/useResolve.js"
+import { useResolveAll } from "../../src/react/useResolveAll.js"
 import { Root } from "../setup/react.js"
 import { flush, tracked } from "../setup/helpers.js"
 import type { Tracked } from "../setup/helpers.js"
@@ -99,8 +98,11 @@ describe("the plugin pattern", () => {
         let seen: Record<string, string[]> = {}
 
         function Probe(): ReactNode {
-            const container = useContainer()
-            const resolver = new Resolver(container)
+            // Three doors onto the same widths: the hooks, the module's own container, and the canonical
+            // resolver the context hands out. The container is reached off the module — there is no hook
+            // for it any more.
+            const container = useModule().container
+            const resolver = useResolver()
 
             seen = {
                 hookChained: labels(useResolveAll<{ label: string }>(PLUGINS, "chained")),

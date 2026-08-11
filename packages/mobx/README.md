@@ -54,12 +54,12 @@ class ChartStore extends ViewModel {
 
 export const ChartModule = createModuleComponent<ChartProps>(
     { providers: [ChartStore] },
-    { propsAdapter: mobxProps<ChartProps>(), propsToken: ChartPropsRef }
+    { adapter: mobxProps<ChartProps>(), token: ChartPropsRef }
 )
 ```
 
 The store reads its props inside a reaction and never hears about React at all. The `PropsRef` subclass is
-what types them: `propsToken` registers the bridged observable under `ChartPropsRef`, so
+what types them: the bridge's `token` registers the bridged observable under `ChartPropsRef`, so
 `inject(ChartPropsRef)` returns a ref whose `current` is `ChartProps` and not `unknown`.
 
 - **`mobxProps()`** — a `PropsAdapter` that mints one shallow observable and mutates it in place on every
@@ -67,10 +67,15 @@ what types them: `propsToken` registers the bridged observable under `ChartProps
   parent stops passing are removed.
 - **`ViewModel`** — `track(disposer)` and a lazy `AbortSignal`, released in reverse order at
   `onModuleDestroy`. It does **no** MobX annotation of its own; annotate in your own constructor.
+  The base owns all four `onModule*` hooks and **seals** them: override `onInit()`, `onMount()`,
+  `onUnmount()` or `onDestroy()` instead — all optional, no `super` call. Redefining an `onModule*` throws
+  at construction rather than silently dropping the teardown that runs after your `onDestroy()`.
 - **`makeInheritedAutoObservable(target, overrides?, options?)`** — MobX's own
   [refuses any class with a superclass](https://mobx.js.org/subclassing.html#limitations); this walks the
   prototype chain instead. Call it exactly once per instance, in the most derived constructor. Injected
-  collaborators are just fields, so exclude them with `false`.
+  collaborators are just fields, so exclude them with `false`. Non-configurable own properties are skipped
+  — MobX deletes a property before redefining it, so this is what lets a sealed `ViewModel` be annotated
+  at all.
 
 > ⚠️ With the call in a **base** constructor, a subclass's own **fields** are never observable —
 > JavaScript initialises them after `super()` returns. Methods and getters are fine at every level. This

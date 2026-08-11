@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest"
 
-import { Scope, inject } from "@remodulo/container"
+import { Resolver, Scope, inject } from "@remodulo/container"
 import type { Constructor } from "@remodulo/container"
-import type { Provider } from "../../src/core/provider/provider.types.js"
-import { Resolver } from "../../src/core/providers/resolver/resolver.provider.js"
+import type { Provider } from "../../src/core/provider.types.js"
 import { makeApp, makeChild } from "../setup/helpers.js"
-import type { Module } from "../../src/core/module/module.js"
+import { App, type Module } from "../../src/core/module.js"
+import { ModuleStatus } from "../../src/core/module-lifecycle.types.js"
 
 // THE PARTICIPATION MATRIX — which providers take part in the module lifecycle.
 // ========================================
@@ -39,8 +39,13 @@ type Instrumented = Constructor<Participant> & { readonly instances: readonly Pa
 const NONE: Marks = { init: 0, mount: 0, unmount: 0, destroy: 0 }
 /** Adopted before the module mounted: the full four phases. */
 const EAGER: Marks = { init: 1, mount: 1, unmount: 1, destroy: 1 }
-/** Adopted after the module mounted: init on arrival, and mount has already gone past. */
-const LATE: Marks = { init: 1, mount: 0, unmount: 1, destroy: 1 }
+/**
+ * Adopted after the module mounted: the arrival is CAUGHT UP through init and then mount, so it ends up
+ * exactly where an eager sibling is. Lazy changes WHEN a provider joins the lifecycle, never which phases
+ * it gets — which is why this is the same set of marks as EAGER, kept under its own name so a cell still
+ * says which timing it is exercising.
+ */
+const LATE: Marks = { init: 1, mount: 1, unmount: 1, destroy: 1 }
 
 /** A class provider's implementation, counting hooks per instance. */
 function instrumented(label: string, log: string[]): Instrumented {
@@ -169,7 +174,7 @@ describe("adopted — class forms", () => {
         expect(Service.instances[0]?.marks).toEqual(EAGER)
     })
 
-    it("4. { provide, useClass, lazy } — single, resolved after mount, adopted init-only", async () => {
+    it("4. { provide, useClass, lazy } — single, resolved after mount, caught up in full", async () => {
         const log: string[] = []
         const Service = instrumented("S", log)
 
@@ -327,7 +332,29 @@ describe("adopted — value forms", () => {
         expect(Service.instances[0]?.marks).toEqual(EAGER)
     })
 
-    it("12b. { provide, useValue, multi } in a LAZY collection — adopted at the first resolveAll", async () => {
+    it("12b. { provide, useValue, multi } beside a lazy member — REFUSED at registration", () => {
+        const log: string[] = []
+        const value = participant("V", log, 1)
+        const Service = instrumented("S", log)
+
+        // The eager verdict is taken per ENTRY, so an eager value member drags the whole token into the
+        // eager pass and the lazy class beside it is built at init after all — the lazy declaration would
+        // be silently overruled. The registration ledger now counts value members, so the disagreement is
+        // refused where every other one is: at the door.
+        expect(() =>
+            makeApp({
+                providers: [
+                    { provide: TOKEN, useClass: Service, multi: true, lazy: true } as Provider,
+                    { provide: TOKEN, useValue: value, multi: true },
+                ],
+            })
+        ).toThrow("declares `lazy: false` while the collection already registered for that token is `lazy: true`.")
+
+        expect(value.marks).toEqual(NONE)
+        expect(Service.instances).toHaveLength(0)
+    })
+
+    it("12c. { provide, useValue, multi, lazy } in an ALL-LAZY collection — adopted on first resolveAll", async () => {
         const log: string[] = []
         const value = participant("V", log, 1)
         const Service = instrumented("S", log)
@@ -335,17 +362,20 @@ describe("adopted — value forms", () => {
         const module = makeApp({
             providers: [
                 { provide: TOKEN, useClass: Service, multi: true, lazy: true } as Provider,
-                { provide: TOKEN, useValue: value, multi: true },
+                { provide: TOKEN, useValue: value, multi: true, lazy: true },
             ],
         })
-        module.mount()
 
-        // MEASURED (scratch/probe-multiprovider-6-lazy-value-member.ts): the value is BOUND eagerly, but a
-        // constant's activation only fires when something reads it — and the lazy group was skipped. So it
-        // waits with the class member and adopts late, alongside it.
+        // Agreement restored, and the whole collection now honours it: nothing is materialized at init, so
+        // the constant is not adopted either. `lazy` on a value defers the ADOPTION, not a construction.
+        expect(value.marks).toEqual(NONE)
+        expect(Service.instances).toHaveLength(0)
+
+        module.mount()
         expect(value.marks).toEqual(NONE)
 
-        module.container.resolveAll(TOKEN)
+        expect(module.container.resolveAll(TOKEN)).toEqual([Service.instances[0], value])
+
         module.unmount()
         await module.destroy()
 
@@ -409,6 +439,103 @@ describe("adopted — value forms", () => {
 
         // Not LATE: it was adopted while the module was still initializing, so it is an ordinary member.
         expect(Lazy.instances[0]?.marks).toEqual(EAGER)
+    })
+})
+
+
+// Aliases and the eager pass
+// ========================================
+//
+// THE MODEL: `lazy` on ANY entry controls whether the owning module ASKS for it at init. A binding asks by
+// constructing; an alias asks by resolving through. So an alias is in the eager pass unless it says
+// otherwise — and because materialization is reported to the entry's OWNER (D53's chain rule), the ask can
+// land in one module and the adoption in another.
+//
+// The rows above stay green through this because their targets are eager bindings in the same module: the
+// alias's ask arrives at something the pass was going to build anyway. The cells here are the three shapes
+// where the ask is the only thing that builds it.
+
+describe("aliases and the eager pass", () => {
+    it("29. an eager alias in a CHILD materializes its target in the PARENT, which adopts it", async () => {
+        const log: string[] = []
+        const Service = instrumented("T", log)
+
+        const parent = makeApp({
+            providers: [{ provide: OTHER, useClass: Service, lazy: true } as Provider],
+        })
+        parent.mount()
+
+        // Nothing yet: the parent's own entry is lazy, so its eager pass skipped it.
+        expect(Service.instances).toHaveLength(0)
+
+        // The child's eager pass resolves through its alias. The ask happens here; the materialization —
+        // and therefore the adoption — happens at the module that OWNS the target.
+        const child = makeChild(parent, { providers: [{ provide: TOKEN, useExisting: OTHER } as Provider] })
+        child.mount()
+
+        expect(Service.instances).toHaveLength(1)
+        expect(log).toEqual(["T#1:ctor", "T#1:init", "T#1:mount"])
+
+        // Torn down on the PARENT's schedule, not the child's — the child never owned it.
+        child.unmount()
+        await child.destroy()
+        expect(Service.instances[0]?.marks).toEqual({ init: 1, mount: 1, unmount: 0, destroy: 0 })
+
+        parent.unmount()
+        await parent.destroy()
+        expect(Service.instances[0]?.marks).toEqual(EAGER)
+    })
+
+    it("30. a LAZY alias asks for nothing at init, and its target catches up at the owner on first read", async () => {
+        const log: string[] = []
+        const Service = instrumented("T", log)
+
+        const module = makeApp({
+            providers: [
+                { provide: OTHER, useClass: Service, lazy: true } as Provider,
+                { provide: TOKEN, useExisting: OTHER, lazy: true } as Provider,
+            ],
+        })
+        module.mount()
+
+        // Both halves lazy, so init asks for nothing at all.
+        expect(log).toEqual([])
+        expect(Service.instances).toHaveLength(0)
+
+        // First real resolution through the alias builds the target and adopts it at its owner, which
+        // catches it up through init and mount because the module is already mounted.
+        expect(module.container.resolve(TOKEN)).toBeDefined()
+        expect(Service.instances).toHaveLength(1)
+        expect(log).toEqual(["T#1:ctor", "T#1:init", "T#1:mount"])
+
+        // Already mounted above, so the teardown runs by hand rather than through `drive`.
+        module.unmount()
+        await module.destroy()
+        expect(Service.instances[0]?.marks).toEqual(EAGER)
+    })
+
+    it("31. a PLAIN alias drags a lazy target into the eager pass — the deliberate flip", async () => {
+        const log: string[] = []
+        const Service = instrumented("T", log)
+
+        const module = makeApp({
+            providers: [
+                { provide: OTHER, useClass: Service, lazy: true } as Provider,
+                { provide: TOKEN, useExisting: OTHER } as Provider,
+            ],
+        })
+
+        // THE BEHAVIOUR CHANGE, pinned deliberately. The target says `lazy` and the alias does not, so the
+        // alias's ask overrules it: an eager entry pointing at a lazy one is a contradiction, and the ask
+        // wins because asking is what the eager pass IS. Aliases used to be skipped entirely, which made
+        // this combination silently lazy.
+        //
+        // REMEDY, if the laziness was the point: mark BOTH lazy. Cell 30 is that spelling.
+        expect(Service.instances).toHaveLength(1)
+        expect(log).toEqual(["T#1:ctor", "T#1:init"])
+
+        await drive(module)
+        expect(Service.instances[0]?.marks).toEqual(EAGER)
     })
 })
 
@@ -746,5 +873,91 @@ describe("never adopted — request scope", () => {
         expect(Requested.instances).toHaveLength(1)
         expect(Requested.instances[0]?.marks).toEqual(NONE)
         expect(log.filter((entry) => entry.endsWith(":init"))).toEqual(["O#1:init"])
+    })
+})
+
+// OUTSIDE THE MATRIX — construct()
+// ========================================
+//
+// THE DESIGN LINE: `construct()` builds outside the lifecycle plane; its instances are caller-owned, never
+// module participants.
+//
+// Every cell above turns on a REGISTRATION: adoption rides `afterMaterialize`, `afterMaterialize` carries
+// an entry snapshot, and an entry is what registration creates. `container.construct(cls)` deliberately has
+// none of that — it opens a frame so `inject()` works in the constructor and calls `new cls()`, and that is
+// the whole of it. Verified against the kernel source (`Container#construct`): it announces nothing, on any
+// of the four channels. So a class with all four hooks, built this way, is an object the caller holds and
+// the module has never heard of — not "adopted late", not "adopted and skipped", simply not in the plane.
+//
+// The one thing that DOES cross over is the reads the constructor makes, and those are judged like any
+// other read the module answers. That is the second cell, and it is the argument made executable.
+
+describe("outside the matrix — construct()", () => {
+    it("27. builds a lifecycle candidate before init and after, and adopts neither", async () => {
+        const log: string[] = []
+        const Candidate = instrumented("K", log)
+
+        const events: string[] = []
+        const app = new App({})
+        for (const event of ["beforeResolution", "afterResolution", "beforeMaterialize", "afterMaterialize"] as const) {
+            app.container.on(event, () => events.push(event))
+        }
+
+        // PRE-INIT, and the gate is already watching — it is armed in the ModuleLifecycle constructor, not
+        // by init(). It never fires, because no entry means no resolution to announce.
+        const early = app.container.construct(Candidate)
+        expect(events).toEqual([])
+        expect(app.status).toBe(ModuleStatus.Created)
+
+        app.init()
+
+        // POST-INIT, past the eager pass and inside the plane's working life. Same answer — but asked as a
+        // DELTA, because `init()` legitimately fills this list: the eager pass resolves and materializes
+        // the system providers, and those are real events on this container. What must be zero is what the
+        // `construct` call below adds to it.
+        const beforeLate = events.length
+        expect(beforeLate).toBeGreaterThan(0)
+
+        const late = app.container.construct(Candidate)
+        expect(late).not.toBe(early)
+        expect(events).toHaveLength(beforeLate)
+
+        await drive(app)
+
+        // Two instances, both the caller's, neither one ever notified of anything.
+        expect(Candidate.instances).toHaveLength(2)
+        expect(Candidate.instances[0]).toBe(early)
+        expect(Candidate.instances[1]).toBe(late)
+        for (const instance of Candidate.instances) expect(instance.marks).toEqual(NONE)
+        expect(log).toEqual(["K#1:ctor", "K#2:ctor"])
+    })
+
+    it("28. is judged by the module's status through the reads its constructor makes", () => {
+        const log: string[] = []
+        const Dependency = instrumented("D", log)
+
+        const Dependent = class {
+            readonly dep = inject(TOKEN)
+        }
+
+        const app = new App({ providers: [{ provide: TOKEN, useClass: Dependency } as Provider] })
+
+        // `construct()` announces nothing of its own, but the frame it opens is anchored at this module's
+        // container — so an `inject()` in the constructor is an ordinary read, and reads are exactly what
+        // the resolution gate judges. A dependency-free construct sails past a `created` module; this one
+        // is refused, by the inner read rather than by anything construct() does.
+        expect(() => app.container.construct(Dependent)).toThrow(
+            'Cannot resolve MATRIX from a module whose status is "created"'
+        )
+        expect(Dependency.instances).toHaveLength(0)
+
+        app.init()
+
+        // Armed, and the read lands. The holder is still not a participant — the dependency it pulled is
+        // one, because the module registered THAT.
+        const built = app.container.construct(Dependent)
+        expect(built.dep).toBe(app.container.resolve(TOKEN))
+        expect(Dependency.instances).toHaveLength(1)
+        expect(log).toEqual(["D#1:ctor", "D#1:init"])
     })
 })

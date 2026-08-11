@@ -1,10 +1,8 @@
 import { describe, expect, it } from "vitest"
 
-import { Container, Scope } from "@remodulo/container"
-import { App, Module } from "../../src/core/module/module.js"
-import { LIFECYCLE } from "../../src/core/providers/module-lifecycle/module-lifecycle.token.js"
-import { ModuleTraversal } from "../../src/core/providers/module-traversal/module-traversal.provider.js"
-import { Resolver } from "../../src/core/providers/resolver/resolver.provider.js"
+import { Container, Resolver, Scope } from "@remodulo/container"
+import { App, Module } from "../../src/core/module.js"
+import { ModuleTraversal } from "../../src/core/module-traversal.js"
 import { plain } from "../setup/helpers.js"
 
 // What a module declared, read off the container.
@@ -22,19 +20,20 @@ import { plain } from "../setup/helpers.js"
 // are covered against the real messages in `tests/container/providers.test.ts`, and `lazy` reaching entry
 // metadata in `tests/lifecycle/lazy.test.ts`.
 
-const SYSTEM_TOKENS = [Module, Resolver, ModuleTraversal, LIFECYCLE]
+// Three since the lifecycle stopped being a registration and became `module.lifecycle`.
+const SYSTEM_TOKENS = [Module, Resolver, ModuleTraversal]
 
 const ALIAS_TARGET = Symbol.for("tests.snapshot.alias-target")
 const ALIAS = Symbol.for("tests.snapshot.alias")
 const VALUE = Symbol.for("tests.snapshot.value")
 
-/** The registrations minus the four every module makes for itself. */
+/** The registrations minus the three every module makes for itself. */
 function userRegistrations(module: Module) {
     return module.container.registrations().slice(SYSTEM_TOKENS.length)
 }
 
 describe("system providers", () => {
-    it("opens with the four system providers, in order", () => {
+    it("opens with the three system providers, in order", () => {
         const registrations = new App().container.registrations()
 
         expect(registrations.slice(0, SYSTEM_TOKENS.length).map((entry) => entry.token)).toEqual(SYSTEM_TOKENS)
@@ -109,6 +108,7 @@ describe("user providers", () => {
         const parent = new App({ providers: [{ provide: VALUE, useValue: "parent" }] })
         parent.init()
         const child = new Module(parent, { providers: [{ provide: ALIAS_TARGET, useValue: "child" }] })
+        child.init()
 
         expect(userRegistrations(parent).map((entry) => entry.token)).toEqual([VALUE])
         expect(userRegistrations(child).map((entry) => entry.token)).toEqual([ALIAS_TARGET])
@@ -119,6 +119,7 @@ describe("user providers", () => {
 
     it("does not depend on a container being passed in — a Module owns its own", () => {
         const module = new App({ providers: [{ provide: VALUE, useValue: 1 }] })
+        module.init()
 
         expect(module.container).toBeInstanceOf(Container)
         expect(module.container.resolve(VALUE)).toBe(1)

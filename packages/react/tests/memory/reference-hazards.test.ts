@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, it } from "vitest"
 
-import { App, Module } from "../../src/core/module/module.js"
-import { PropsRef } from "../../src/core/providers/props-ref/props-ref.provider.js"
+import { App, Module } from "../../src/core/module.js"
+import { PropsRef } from "../../src/primitives/props-ref.js"
 import { EAGER, exercise, makeProviders, type EagerService } from "./fixtures.js"
 import { LeakTracker, assertGcEnabled, forceGc, scrub, settle } from "./gc.js"
 
@@ -74,10 +74,10 @@ describe("hazard: ModuleLifecycle's collected-instance list", () => {
         const alive = tracker.aliveByLabel()
         console.log(`\n[hazard: instance list after destroy] held module id=${corpse.id}\n${tracker.report()}\n`)
 
-        // There were TWO retaining edges here. `#runDestroyPhase` now clears its Set in a `finally`, so
-        //     Module → #lifecycle (ModuleLifecycle) → #instances (Set) → every collected instance
+        // There were TWO retaining edges here. `#runDestroyPhase` now clears its map in a `finally`, so
+        //     Module → #lifecycle (ModuleLifecycle) → #participants (Map) → every adopted instance
         // is cut whether teardown succeeded or threw. The second one survives:
-        //     Module → container (Container) → inversify's singleton activation cache → the instance
+        //     Module → container (Container) → the entry's singleton cache → the instance
         // destroy() detaches the module from its parent and runs the hooks, but it never unbinds or
         // disposes the container, so `container.resolve(TOKEN)` after destroy still returns the identical
         // pre-destroy instance. Nothing in the shipped React path holds a destroyed module (ModuleProvider
@@ -98,18 +98,19 @@ describe("hazard: ModuleLifecycle's collected-instance list", () => {
     }, 60_000)
 })
 
-describe("hazard: binding-level onResolution listeners", () => {
+describe("hazard: the module's container-level hook", () => {
     beforeAll(() => {
         assertGcEnabled()
     })
 
-    it("collects an abandoned container, its bindings and its listeners without destroy()", async () => {
+    it("collects an abandoned container, its bindings and its hook without destroy()", async () => {
         const tracker = new LeakTracker()
 
-        // `#collectInstances` attaches a listener per binding whose closure captures the ModuleLifecycle,
-        // which reaches the Module, which reaches the Container that owns the binding. That is a cycle —
-        // fine for a tracing collector, fatal for refcounting. Abandoning the module without ever calling
-        // destroy() is the sharpest way to ask.
+        // `#collectParticipants` arms one `afterMaterialize` hook whose closure captures the
+        // ModuleLifecycle, which reaches the Module, which reaches the Container the hook rides on. That is
+        // a cycle — fine for a tracing collector, fatal for refcounting. The hook is never disposed, so its
+        // lifetime IS the container's; abandoning the module without ever calling destroy() is the sharpest
+        // way to ask whether that retains anything.
         await abandoned(tracker)
         await scrub(() => abandoned(new LeakTracker()), 3)
 

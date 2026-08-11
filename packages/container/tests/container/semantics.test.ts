@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest"
 
 import { Container } from "../../src/container.js"
+import { Scope } from "../../src/container.types.js"
 import type { Constructor, InjectionToken } from "../../src/container.types.js"
+import type { CycleError } from "../../src/container.errors.js"
 import { inject } from "../../src/injector.js"
 
 // Provider semantics under pressure.
@@ -217,6 +219,151 @@ describe("circular dependencies", () => {
         container.register([Consumer, Later])
 
         expect(container.resolve(Consumer).later).toBeInstanceOf(Later)
+    })
+})
+
+// Aliases join the SAME cycle chain
+// ========================================
+//
+// There is one cycle mechanism, not two. An alias is a read like any other, so the token it was asked
+// through rides the resolution's chain for the duration of that read, and `#assertAcyclic` — the check a
+// constructor ring already goes through — is what catches a ring of aliases too. The chain is per ACTIVE
+// PATH, built by nesting, so it unwinds as the read unwinds and a token reached twice by two different
+// paths is not a cycle.
+//
+// The capability this buys is the mixed case at the bottom: a ring made of constructor edges AND alias
+// edges is one ring, on one chain, with the alias link visible in the message. Two separate mechanisms
+// could never have reported that, because neither would have seen the whole of it.
+
+describe("cycles through aliases", () => {
+    it("catches an alias pointing at itself", () => {
+        const SELF = Symbol("SELF")
+
+        const container = new Container()
+        container.register({ provide: SELF, useExisting: SELF })
+
+        expect(() => container.resolve(SELF)).toThrowError("Circular dependency found: SELF -> SELF")
+    })
+
+    it("catches a ring of two, and reports it from whichever end asked", () => {
+        const A = Symbol("A")
+        const B = Symbol("B")
+
+        const container = new Container()
+        container.register([
+            { provide: A, useExisting: B },
+            { provide: B, useExisting: A },
+        ])
+
+        // The token asked for is the token the chain opens and closes on — the same convention the
+        // constructor ring above follows.
+        expect(() => container.resolve(A)).toThrowError("Circular dependency found: A -> B -> A")
+        expect(() => container.resolve(B)).toThrowError("Circular dependency found: B -> A -> B")
+    })
+
+    it("catches a longer ring, naming every hop in traversal order", () => {
+        const A = Symbol("A")
+        const B = Symbol("B")
+        const C = Symbol("C")
+
+        const container = new Container()
+        container.register([
+            { provide: A, useExisting: B },
+            { provide: B, useExisting: C },
+            { provide: C, useExisting: A },
+        ])
+
+        expect(() => container.resolve(A)).toThrowError("Circular dependency found: A -> B -> C -> A")
+    })
+
+    it("throws the same CycleError a constructor ring throws", () => {
+        const A = Symbol("A")
+        const B = Symbol("B")
+
+        const container = new Container()
+        container.register([
+            { provide: A, useExisting: B },
+            { provide: B, useExisting: A },
+        ])
+
+        const thrown = (() => {
+            try {
+                container.resolve(A)
+                return null
+            } catch (error) {
+                return error as CycleError
+            }
+        })()
+
+        // One mechanism means one error type and one `chain` field, whatever kind of edge closed the ring.
+        expect(thrown?.constructor.name).toBe("CycleError")
+        expect(thrown?.chain).toEqual([A, B, A])
+    })
+
+    it("catches a ring made of BOTH constructor and alias edges, in one chain", () => {
+        // THE point of the unification. `Alpha` injects a token that is an ALIAS, whose target injects
+        // `Alpha` back. The ring crosses both planes, and neither a construction-only check nor an
+        // alias-only check could see all of it — the chain below names the alias link in its own right.
+        const BRIDGE = Symbol("BRIDGE")
+
+        class Alpha {
+            readonly bridge = inject(BRIDGE)
+        }
+        class Gamma {
+            readonly alpha = inject(Alpha)
+        }
+
+        const container = new Container()
+        container.register([Alpha, Gamma, { provide: BRIDGE, useExisting: Gamma }])
+
+        expect(() => container.resolve(Alpha)).toThrowError(
+            "Circular dependency found: Alpha -> BRIDGE -> Gamma -> Alpha"
+        )
+    })
+
+    it("leaves a non-cyclic alias read alone, and unwinds after it", () => {
+        const ALIAS = Symbol("ALIAS")
+        class Service {
+            readonly kind = "service"
+        }
+
+        const container = new Container()
+        container.register([Service, { provide: ALIAS, useExisting: Service }])
+
+        // Repeatable, which is the unwinding: a chain that leaked would refuse the second read.
+        expect(container.resolve<Service>(ALIAS).kind).toBe("service")
+        expect(container.resolve<Service>(ALIAS)).toBe(container.resolve(Service))
+        expect(container.resolve<Service>(ALIAS).kind).toBe("service")
+    })
+
+    it("leaves a diamond alone: one target reached twice by two different paths", () => {
+        // The chain is per ACTIVE PATH, not a history of everything the resolution has touched. `Left` and
+        // `Right` both reach `Shared` through their own aliases, and neither is a cycle — the first path
+        // has unwound before the second is walked. Transient on purpose: a cached singleton would
+        // short-circuit before the check and pin nothing.
+        const VIA_LEFT = Symbol("VIA_LEFT")
+        const VIA_RIGHT = Symbol("VIA_RIGHT")
+        const SHARED = Symbol("SHARED")
+
+        class Shared {}
+        class Diamond {
+            readonly left = inject(VIA_LEFT)
+            readonly right = inject(VIA_RIGHT)
+        }
+
+        const container = new Container()
+        container.register([
+            Diamond,
+            { provide: SHARED, useClass: Shared, scope: Scope.Transient },
+            { provide: VIA_LEFT, useExisting: SHARED },
+            { provide: VIA_RIGHT, useExisting: SHARED },
+        ])
+
+        const diamond = container.resolve(Diamond)
+
+        expect(diamond.left).toBeInstanceOf(Shared)
+        expect(diamond.right).toBeInstanceOf(Shared)
+        expect(diamond.left).not.toBe(diamond.right)
     })
 })
 

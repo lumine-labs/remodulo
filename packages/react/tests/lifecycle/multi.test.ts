@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest"
 
 import { Scope, injectAll } from "@remodulo/container"
-import type { Provider } from "../../src/core/provider/provider.types.js"
-import { makeApp, makeChild, phase, tracked } from "../setup/helpers.js"
+import type { Provider } from "../../src/core/provider.types.js"
+import { makeApp, makeChild, phase, refuses, tracked } from "../setup/helpers.js"
 
 // Lifecycle of a multi-provider collection.
 // ========================================
@@ -16,6 +16,14 @@ const PLUGINS = Symbol("PLUGINS")
 
 const member = (service: Provider, options: { lazy?: true } = {}): Provider =>
     ({ provide: PLUGINS, useClass: service, multi: true, ...options }) as Provider
+
+/** The same four hooks on a plain object — what a `useValue` member contributes. */
+const valueMember = (log: string[]): object => ({
+    onModuleInit: () => log.push("V:init"),
+    onModuleMount: () => log.push("V:mount"),
+    onModuleUnmount: () => log.push("V:unmount"),
+    onModuleDestroy: () => log.push("V:destroy"),
+})
 
 describe("eager collection", () => {
     it("constructs every member in declaration order and adopts them all", () => {
@@ -86,17 +94,18 @@ describe("lazy collection", () => {
 
         module.container.resolveAll(PLUGINS)
 
-        // Late adoption is init-only: mount is a tree event that has already gone past.
-        expect(log).toEqual(["A:ctor", "A:init", "B:ctor", "B:init"])
-        expect(a.counts.mount).toBe(0)
-        expect(b.counts.mount).toBe(0)
+        // Each member catches up as it is constructed, and the module is mounted, so each one runs init and
+        // mount before the next member is built — adoption is per participant, not per collection.
+        expect(log).toEqual(["A:ctor", "A:init", "A:mount", "B:ctor", "B:init", "B:mount"])
+        expect(a.counts.mount).toBe(1)
+        expect(b.counts.mount).toBe(1)
 
         module.unmount()
         expect(phase(log, "unmount")).toEqual(["B:unmount", "A:unmount"])
 
         await module.destroy()
-        expect(a.counts).toEqual({ init: 1, mount: 0, unmount: 1, destroy: 1 })
-        expect(b.counts).toEqual({ init: 1, mount: 0, unmount: 1, destroy: 1 })
+        expect(a.counts).toEqual({ init: 1, mount: 1, unmount: 1, destroy: 1 })
+        expect(b.counts).toEqual({ init: 1, mount: 1, unmount: 1, destroy: 1 })
     })
 
     it("joins once, however often the collection is read", async () => {
@@ -111,7 +120,7 @@ describe("lazy collection", () => {
         module.unmount()
         await module.destroy()
 
-        expect(a.counts).toEqual({ init: 1, mount: 0, unmount: 1, destroy: 1 })
+        expect(a.counts).toEqual({ init: 1, mount: 1, unmount: 1, destroy: 1 })
     })
 
     it("refuses a collection whose constructing members disagree about lazy", () => {
@@ -123,22 +132,57 @@ describe("lazy collection", () => {
         )
     })
 
-    it("stays lazy with a value member alongside, and the value waits with it", async () => {
+    // The contradiction this cell used to pin, and the fix that closed it. `#collectParticipants` decides
+    // eagerness per ENTRY, and a value entry is an ordinary singleton entry — so a non-lazy value member
+    // DRAGGED the whole token into the eager pass and the `lazy: true` beside it was overruled without a
+    // word. The ledger used to exempt value members from the agreement ("it builds nothing"), which is what
+    // let the pair register at all. It no longer does: a value member settles the collection's laziness
+    // alongside the constructing ones, and the mix is refused at the door like every other disagreement.
+    it("refuses a lazy collection with a non-lazy value member alongside", () => {
         const log: string[] = []
         const lazyClass = tracked(log, "A")
-        const value = {
-            onModuleInit: () => log.push("V:init"),
-            onModuleMount: () => log.push("V:mount"),
-            onModuleUnmount: () => log.push("V:unmount"),
-            onModuleDestroy: () => log.push("V:destroy"),
-        }
+        const value = valueMember(log)
+
+        expect(() =>
+            makeApp({
+                providers: [member(lazyClass, { lazy: true }), { provide: PLUGINS, useValue: value, multi: true }],
+            })
+        ).toThrow(
+            "Provider for PLUGINS declares `lazy: false` while the collection already registered for that token is `lazy: true`."
+        )
+
+        expect(log).toEqual([])
+    })
+
+    it("refuses it from the other side too — an eager collection joined by a lazy value member", () => {
+        const log: string[] = []
+
+        expect(() =>
+            makeApp({
+                providers: [
+                    member(tracked(log, "A")),
+                    { provide: PLUGINS, useValue: valueMember(log), multi: true, lazy: true },
+                ],
+            })
+        ).toThrow(
+            "Provider for PLUGINS declares `lazy: true` while the collection already registered for that token is `lazy: false`."
+        )
+    })
+
+    it("takes a value member that agrees, and defers its adoption with the rest", async () => {
+        const log: string[] = []
+        const lazyClass = tracked(log, "A")
+        const value = valueMember(log)
 
         const module = makeApp({
-            providers: [member(lazyClass, { lazy: true }), { provide: PLUGINS, useValue: value, multi: true }],
+            providers: [
+                member(lazyClass, { lazy: true }),
+                { provide: PLUGINS, useValue: value, multi: true, lazy: true },
+            ],
         })
 
-        // The lazy verdict comes from the CONSTRUCTING member, so declaring the value first would not drag
-        // the group into the eager pass either — nothing here is built at init or at mount.
+        // Nothing at init and nothing at mount: `lazy` on a value defers the MATERIALIZATION that adopts
+        // it, which is the only thing a value ever had to defer.
         expect(log).toEqual([])
         module.mount()
         expect(log).toEqual([])
@@ -147,18 +191,16 @@ describe("lazy collection", () => {
         expect(all).toHaveLength(2)
         expect(all[1]).toBe(value)
 
-        // MEASURED (scratch/probe-multiprovider-6-lazy-value-member.ts): the value member is adopted at the
-        // first `resolveAll`, NOT at init. It is bound eagerly, but a constant's activation only fires when
-        // something reads it, and the eager pass skipped the whole group. Late adoption is init-only for it
-        // too — no mount, exactly like the lazy class beside it.
-        expect(log).toEqual(["A:ctor", "A:init", "V:init"])
+        // Each member catches up as it is materialized, and the module is mounted, so both run init and
+        // mount in collection order.
+        expect(log).toEqual(["A:ctor", "A:init", "A:mount", "V:init", "V:mount"])
 
         module.unmount()
         expect(phase(log, "unmount")).toEqual(["V:unmount", "A:unmount"])
 
         await module.destroy()
         expect(phase(log, "destroy")).toEqual(["V:destroy", "A:destroy"])
-        expect(lazyClass.counts).toEqual({ init: 1, mount: 0, unmount: 1, destroy: 1 })
+        expect(lazyClass.counts).toEqual({ init: 1, mount: 1, unmount: 1, destroy: 1 })
     })
 
     it("stays lazy with an alias member alongside, whose target keeps its own timing", async () => {
@@ -170,7 +212,9 @@ describe("lazy collection", () => {
             providers: [
                 target,
                 member(lazyClass, { lazy: true }),
-                { provide: PLUGINS, useExisting: target, multi: true } as Provider,
+                // `lazy` on the alias, matching the member beside it: an alias reconciles with the
+                // collection like every other form now, and a plain one here would be refused.
+                { provide: PLUGINS, useExisting: target, multi: true, lazy: true } as Provider,
             ],
         })
 
@@ -190,7 +234,8 @@ describe("lazy collection", () => {
 
         // The target was adopted once, through its OWN registration — the alias member added no second claim.
         expect(target.counts).toEqual({ init: 1, mount: 1, unmount: 1, destroy: 1 })
-        expect(lazyClass.counts).toEqual({ init: 1, mount: 0, unmount: 1, destroy: 1 })
+        // An alias member binds nothing, so the collection stays lazy and the class catches up on first read.
+        expect(lazyClass.counts).toEqual({ init: 1, mount: 1, unmount: 1, destroy: 1 })
     })
 })
 
@@ -450,7 +495,9 @@ describe("adoption across the chain", () => {
         root.mount()
         expect(phase(log, "mount")).toEqual(["R:mount", "M:mount", "L:mount"])
 
-        // Destroying the leaf takes its own contribution and nothing else.
+        // Destroying the leaf takes its own contribution and nothing else. destroy() accepts `unmounted`,
+        // not `mounted`, so the leaf retires itself first — which touches nothing above it.
+        leaf.unmount()
         await leaf.destroy()
         expect(leafPlugin.counts.destroy).toBe(1)
         expect(midPlugin.counts.destroy).toBe(0)

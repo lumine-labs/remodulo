@@ -205,8 +205,8 @@ describe("ResolutionError fields", () => {
     })
 
     it("leaves `mode` undefined on the readers that take no width", () => {
-        // `entry`, `entries` and `onResolution` read this container's own registrations and take no mode,
-        // so there is no width to report — as opposed to one defaulted in for the field's sake.
+        // `entry` and `entries` read this container's own registrations and take no mode, so there is no
+        // width to report — as opposed to one defaulted in for the field's sake.
         const TOKEN = Symbol("PLUGINS")
         const container = new Container()
         container.register({ provide: TOKEN, useValue: "a", multi: true })
