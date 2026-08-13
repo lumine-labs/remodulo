@@ -67,8 +67,10 @@ what types them: the bridge's `token` registers the bridged observable under `Ch
 - **`mobxProps()`** — a `PropsAdapter` that mints one shallow observable and mutates it in place on every
   real props change, inside a `runInAction`. The identity never changes, so reactions stay attached. Keys the
   parent stops passing are removed.
-- **`ViewModel`** — `track(disposer)` and a lazy `AbortSignal`, released in reverse order at
-  `onModuleDestroy`. It does **no** MobX annotation of its own; annotate in your own constructor.
+- **`ViewModel`** — `track(disposer)` and a lazy `AbortSignal`, released in reverse order at **unmount**,
+  so what a mount acquires the matching unmount lets go and a remount starts clean. Destroy is the backstop
+  for a module that never mounted. `onDestroy` may be async and is awaited. It does **no** MobX annotation
+  of its own; annotate in your own constructor.
   The base owns all four `onModule*` hooks and **seals** them: override `onInit()`, `onMount()`,
   `onUnmount()` or `onDestroy()` instead — all optional, no `super` call. Redefining an `onModule*` throws
   at construction rather than silently dropping the teardown that runs after your `onDestroy()`.

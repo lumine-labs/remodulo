@@ -8,6 +8,8 @@ import { PropsRef, type PropsAdapter } from "../primitives/props-ref.js"
 // usePropsRef
 // ========================================
 
+export type PropsRefClass<T> = new (config: { props: object; adapter?: PropsAdapter<any, T> }) => PropsRef<T>
+
 export type UsePropsRefOptions<P extends object, T = P> = {
     adapter?: PropsAdapter<P, T>
     token?: InjectionToken<PropsRef<T>>
@@ -23,7 +25,12 @@ export function usePropsRef<P extends object, T = P>(
     options?: UsePropsRefOptions<P, T>
 ): UsePropsRefResult<T> {
     const adapter = options?.adapter
-    const [ref] = useState(() => new PropsRef<T>({ props, adapter }))
+    const token = options?.token
+
+    const [ref] = useState(() => {
+        const Ctor = typeof token === "function" ? (token as PropsRefClass<T>) : PropsRef
+        return new Ctor({ props, adapter })
+    })
 
     const lastAdapterRef = useRef(adapter)
     useIsomorphicLayoutEffect(() => {
@@ -36,6 +43,6 @@ export function usePropsRef<P extends object, T = P>(
         ref.update(props)
     })
 
-    const provider: ValueProvider<PropsRef<T>> = { provide: options?.token ?? PropsRef, useValue: ref }
+    const provider: ValueProvider<PropsRef<T>> = { provide: token ?? PropsRef, useValue: ref }
     return { ref, provider }
 }

@@ -1,5 +1,3 @@
-import type { ProviderLifecycle } from "@remodulo/react"
-
 // ViewModel
 // ========================================
 
@@ -13,7 +11,7 @@ const SHORT: Record<(typeof HOOKS)[number], string> = {
     onModuleDestroy: "onDestroy",
 }
 
-export abstract class ViewModel implements ProviderLifecycle {
+export abstract class ViewModel {
     constructor() {
         for (
             let proto = Object.getPrototypeOf(this);
@@ -34,24 +32,27 @@ export abstract class ViewModel implements ProviderLifecycle {
     // Hooks
     // ----------------------------------------
 
-    /** @internal */
-    onModuleInit(): void {
+    private onModuleInit(): void {
         this.onInit?.()
     }
-    /** @internal */
-    onModuleMount(): void {
+
+    private onModuleMount(): void {
         this.onMount?.()
     }
-    /** @internal */
-    onModuleUnmount(): void {
-        this.onUnmount?.()
-    }
-    /** @internal */
-    onModuleDestroy(): void {
+
+    private onModuleUnmount(): void {
         try {
-            this.onDestroy?.()
+            this.onUnmount?.()
         } finally {
-            this.#teardown()
+            this.#release()
+        }
+    }
+
+    private async onModuleDestroy(): Promise<void> {
+        try {
+            await this.onDestroy?.()
+        } finally {
+            this.#release()
         }
     }
 
@@ -59,7 +60,7 @@ export abstract class ViewModel implements ProviderLifecycle {
     protected onInit?(): void
     protected onMount?(): void
     protected onUnmount?(): void
-    protected onDestroy?(): void
+    protected onDestroy?(): void | Promise<void>
 
     // AbortController
     // ----------------------------------------
@@ -81,7 +82,7 @@ export abstract class ViewModel implements ProviderLifecycle {
         return disposer
     }
 
-    #teardown(): void {
+    #release(): void {
         const disposers = this.#disposers.splice(0).reverse()
         for (const dispose of disposers) {
             try {
@@ -92,5 +93,6 @@ export abstract class ViewModel implements ProviderLifecycle {
         }
 
         this.#controller?.abort()
+        this.#controller = null
     }
 }

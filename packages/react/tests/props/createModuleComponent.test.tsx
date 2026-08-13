@@ -707,8 +707,11 @@ describe("createModuleComponent with a PropsRef subclass as props.token", () => 
         expect(inLeft.own).toBeInstanceOf(PropsRef)
         expect(inRight.own).toBeInstanceOf(PropsRef)
 
-        // The subclass names the binding; it never constructs it.
-        expect(inLeft.own).not.toBeInstanceOf(LeftPropsRef)
+        // The subclass names the binding AND is what gets built, so the injected value is an instance of
+        // the token that was asked for — which is what makes a subclass worth declaring.
+        expect(inLeft.own).toBeInstanceOf(LeftPropsRef)
+        expect(inRight.own).toBeInstanceOf(RightPropsRef)
+        expect(inLeft.own).not.toBeInstanceOf(RightPropsRef)
 
         // Neither sibling can reach the other's token, and a custom token leaves the class token unbound.
         expect(inLeft.sibling).toBeUndefined()

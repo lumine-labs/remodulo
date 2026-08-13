@@ -14,6 +14,33 @@ import { ViewModel } from "../src/ViewModel"
 
 const HOOKS = ["onModuleInit", "onModuleMount", "onModuleUnmount", "onModuleDestroy"] as const
 
+/**
+ * The module calls the four hooks by looking them up at RUNTIME — it never names their types — so a suite
+ * that drives a view model by hand has to reach past the `private` modifier the same way. The cast IS the
+ * statement that the seal is compile-time only; the runtime seal is what the block below measures.
+ */
+type Driven = { [K in (typeof HOOKS)[number]]: () => unknown }
+const drive = (vm: ViewModel): Driven => vm as unknown as Driven
+
+// The compile-time half of the seal. `private` members cannot be redeclared by a subclass, so an override
+// is an error before it is ever a throw. Checked by `typecheck:tests`, and again against the published
+// declarations, which carry `private onModuleInit;` and its three siblings. Never called.
+function sealIsCompileTime(): void {
+    // @ts-expect-error `onModuleInit` is private on the base — override `onInit()` instead.
+    class OverridesInit extends ViewModel {
+        onModuleInit(): void {}
+    }
+    // @ts-expect-error and the same for the other three.
+    class OverridesDestroy extends ViewModel {
+        onModuleDestroy(): Promise<void> {
+            return Promise.resolve()
+        }
+    }
+    void OverridesInit
+    void OverridesDestroy
+}
+void sealIsCompileTime
+
 const SHORTHANDS = {
     onModuleInit: "onInit",
     onModuleMount: "onMount",
@@ -35,6 +62,7 @@ describe("ViewModel: sealed hooks", () => {
 
     it("refuses an override declared anywhere below the base, not just one level down", () => {
         class Mid extends ViewModel {}
+        // @ts-expect-error the compile-time seal catches this first; the runtime seal is what is measured.
         class Leaf extends Mid {
             override onModuleMount(): void {}
         }
@@ -46,9 +74,10 @@ describe("ViewModel: sealed hooks", () => {
     })
 
     it("closes the field-initializer route as well, which the prototype scan cannot see", () => {
+        // A class field is installed AFTER the base constructor has already sealed the property, and field
+        // initialization defines rather than assigns — so the runtime seal is what refuses it.
+        // @ts-expect-error the compile-time seal refuses the redeclaration ahead of the runtime one.
         class VM extends ViewModel {
-            // A class field is installed AFTER the base constructor has already sealed the property, and
-            // field initialization defines rather than assigns — so the seal is what refuses it.
             override onModuleInit = (): void => {}
         }
 
@@ -60,7 +89,7 @@ describe("ViewModel: sealed hooks", () => {
         const vm = new VM()
 
         expect(() => {
-            vm.onModuleInit = (): void => {}
+            ;(vm as unknown as Record<string, unknown>).onModuleInit = (): void => {}
         }).toThrowError(TypeError)
         expect(() => Object.defineProperty(vm, "onModuleInit", { value: () => {} })).toThrowError(TypeError)
     })
@@ -71,7 +100,7 @@ describe("ViewModel: sealed hooks", () => {
 
         for (const hook of HOOKS) {
             expect(Object.getOwnPropertyDescriptor(vm, hook)).toEqual({
-                value: ViewModel.prototype[hook],
+                value: (ViewModel.prototype as unknown as Driven)[hook],
                 writable: false,
                 enumerable: false,
                 configurable: false,
@@ -96,7 +125,7 @@ describe("ViewModel: sealed hooks", () => {
 // ========================================
 
 describe("ViewModel: lifecycle delegation", () => {
-    it("routes all four hooks to their shorthand, and runs teardown after onDestroy", () => {
+    it("routes all four hooks to their shorthand, and releases at unmount", async () => {
         const log: string[] = []
 
         class VM extends ViewModel {
@@ -119,12 +148,14 @@ describe("ViewModel: lifecycle delegation", () => {
 
         const vm = new VM()
         vm.register()
-        vm.onModuleInit()
-        vm.onModuleMount()
-        vm.onModuleUnmount()
-        vm.onModuleDestroy()
+        drive(vm).onModuleInit()
+        drive(vm).onModuleMount()
+        drive(vm).onModuleUnmount()
+        await drive(vm).onModuleDestroy()
 
-        expect(log).toEqual(["onInit", "onMount", "onUnmount", "onDestroy", "disposer"])
+        // The disposer goes at UNMOUNT, not at destroy: what a mount acquired, the matching unmount
+        // releases. By the time `onDestroy` runs there is nothing left to drain.
+        expect(log).toEqual(["onInit", "onMount", "onUnmount", "disposer", "onDestroy"])
     })
 
     it("treats every shorthand as optional — all four hooks are no-ops on a bare view model", () => {
@@ -132,10 +163,10 @@ describe("ViewModel: lifecycle delegation", () => {
         const vm = new VM()
 
         expect(() => {
-            vm.onModuleInit()
-            vm.onModuleMount()
-            vm.onModuleUnmount()
-            vm.onModuleDestroy()
+            drive(vm).onModuleInit()
+            drive(vm).onModuleMount()
+            drive(vm).onModuleUnmount()
+            void drive(vm).onModuleDestroy()
         }).not.toThrow()
     })
 })
@@ -144,7 +175,7 @@ describe("ViewModel: lifecycle delegation", () => {
 // ========================================
 
 describe("ViewModel: disposal", () => {
-    it("runs tracked disposers in reverse registration order", () => {
+    it("runs tracked disposers in reverse registration order", async () => {
         const order: string[] = []
 
         class VM extends ViewModel {
@@ -157,7 +188,7 @@ describe("ViewModel: disposal", () => {
 
         const vm = new VM()
         vm.register()
-        vm.onModuleDestroy()
+        await drive(vm).onModuleDestroy()
 
         expect(order).toEqual(["third", "second", "first"])
     })
@@ -174,7 +205,7 @@ describe("ViewModel: disposal", () => {
         expect(new VM().expose()).toBe(disposer)
     })
 
-    it("runs onDestroy before the tracked disposers, with no super call", () => {
+    it("runs onDestroy before the tracked disposers, with no super call", async () => {
         const order: string[] = []
 
         class VM extends ViewModel {
@@ -188,12 +219,12 @@ describe("ViewModel: disposal", () => {
 
         const vm = new VM()
         vm.register()
-        vm.onModuleDestroy()
+        await drive(vm).onModuleDestroy()
 
         expect(order).toEqual(["onDestroy", "disposer"])
     })
 
-    it("tears down even when onDestroy throws", () => {
+    it("tears down even when onDestroy throws", async () => {
         const dispose = vi.fn()
         const consoleError = vi.spyOn(console, "error").mockImplementation(() => {})
 
@@ -209,14 +240,15 @@ describe("ViewModel: disposal", () => {
         const vm = new VM()
         vm.register()
 
-        // The base runs teardown in a `finally`, so a throwing shorthand still cannot strand a disposer.
-        expect(() => vm.onModuleDestroy()).toThrowError("override blew up")
+        // The base releases in a `finally`, so a throwing shorthand still cannot strand a disposer — and
+        // the rejection still reaches the module's drain rather than being swallowed.
+        await expect(drive(vm).onModuleDestroy()).rejects.toThrowError("override blew up")
         expect(dispose).toHaveBeenCalledTimes(1)
 
         consoleError.mockRestore()
     })
 
-    it("isolates a throwing disposer so the rest still run", () => {
+    it("isolates a throwing disposer so the rest still run", async () => {
         const order: string[] = []
         const consoleError = vi.spyOn(console, "error").mockImplementation(() => {})
 
@@ -231,14 +263,14 @@ describe("ViewModel: disposal", () => {
 
         const vm = new VM()
         vm.register()
-        vm.onModuleDestroy()
+        await drive(vm).onModuleDestroy()
 
         expect(order).toEqual(["survivor"])
         expect(consoleError).toHaveBeenCalled()
         consoleError.mockRestore()
     })
 
-    it("is safe to destroy twice", () => {
+    it("is safe to destroy twice", async () => {
         const dispose = vi.fn()
 
         class VM extends ViewModel {
@@ -249,8 +281,8 @@ describe("ViewModel: disposal", () => {
 
         const vm = new VM()
         vm.register()
-        vm.onModuleDestroy()
-        vm.onModuleDestroy()
+        await drive(vm).onModuleDestroy()
+        await drive(vm).onModuleDestroy()
 
         expect(dispose).toHaveBeenCalledTimes(1)
     })
@@ -260,7 +292,7 @@ describe("ViewModel: disposal", () => {
 // ========================================
 
 describe("ViewModel: signal", () => {
-    it("hands out one signal per instance and aborts it on destroy", () => {
+    it("hands out one signal per instance and aborts it on destroy", async () => {
         class VM extends ViewModel {
             expose(): AbortSignal {
                 return this.signal()
@@ -273,12 +305,12 @@ describe("ViewModel: signal", () => {
         expect(signal).toBe(vm.expose())
         expect(signal.aborted).toBe(false)
 
-        vm.onModuleDestroy()
+        await drive(vm).onModuleDestroy()
 
         expect(signal.aborted).toBe(true)
     })
 
-    it("aborts after onDestroy runs, so a final request can still use the signal", () => {
+    it("aborts after onDestroy runs, so a final request can still use the signal", async () => {
         let abortedDuringOverride: boolean | null = null
 
         class VM extends ViewModel {
@@ -288,7 +320,7 @@ describe("ViewModel: signal", () => {
         }
 
         const vm = new VM()
-        vm.onModuleDestroy()
+        await drive(vm).onModuleDestroy()
 
         expect(abortedDuringOverride).toBe(false)
     })
@@ -333,18 +365,132 @@ describe("ViewModel: observability", () => {
             expect(vm[hook]).toBe(ViewModel.prototype[hook])
         }
 
-        expect(() => vm.onModuleDestroy()).not.toThrow()
+        expect(() => drive(vm).onModuleDestroy()).not.toThrow()
     })
 
-    it("keeps disposal working after the base's methods are annotated as actions", () => {
+    it("keeps disposal working after the base's methods are annotated as actions", async () => {
         const dispose = vi.fn()
         const vm = new CounterVM()
 
         vm.register(dispose)
         vm.inc()
-        vm.onModuleDestroy()
+        await drive(vm).onModuleDestroy()
 
         expect(vm.count).toBe(2)
+        expect(dispose).toHaveBeenCalledTimes(1)
+    })
+})
+
+// Release at unmount
+// ========================================
+//
+// What a mount acquires, the matching unmount releases — so a remount re-acquires against a clean slate
+// rather than stacking a second subscription on top of the first. Destroy stays the BACKSTOP for the one
+// path that never mounts (init -> destroy), where a constructor-time `track` would otherwise leak.
+
+describe("ViewModel: release at unmount", () => {
+    it("keeps exactly one live subscription across mount/unmount/mount/unmount", () => {
+        let live = 0
+
+        class Subscriber extends ViewModel {
+            protected override onMount(): void {
+                live += 1
+                this.track(() => {
+                    live -= 1
+                })
+            }
+        }
+
+        const vm = new Subscriber()
+        drive(vm).onModuleInit()
+
+        drive(vm).onModuleMount()
+        expect(live).toBe(1)
+        drive(vm).onModuleUnmount()
+        expect(live).toBe(0)
+
+        // The second cycle is the one the old semantics broke: nothing was released at unmount, so the
+        // remount's `track` stacked and two subscriptions were live at once.
+        drive(vm).onModuleMount()
+        expect(live).toBe(1)
+        drive(vm).onModuleUnmount()
+        expect(live).toBe(0)
+    })
+
+    it("drains a constructor-time track at destroy when the module never mounted", async () => {
+        const dispose = vi.fn()
+
+        class NeverMounted extends ViewModel {
+            constructor() {
+                super()
+                this.track(dispose)
+            }
+        }
+
+        const vm = new NeverMounted()
+        drive(vm).onModuleInit()
+        await drive(vm).onModuleDestroy()
+
+        expect(dispose).toHaveBeenCalledTimes(1)
+    })
+
+    it("does not dispose twice when a destroy follows an unmount", async () => {
+        const dispose = vi.fn()
+
+        class VM extends ViewModel {
+            protected override onMount(): void {
+                this.track(dispose)
+            }
+        }
+
+        const vm = new VM()
+        drive(vm).onModuleInit()
+        drive(vm).onModuleMount()
+        drive(vm).onModuleUnmount()
+        expect(dispose).toHaveBeenCalledTimes(1)
+
+        await drive(vm).onModuleDestroy()
+        expect(dispose).toHaveBeenCalledTimes(1)
+    })
+
+    it("aborts the signal at unmount and mints a fresh one for the next mount", () => {
+        class VM extends ViewModel {
+            expose(): AbortSignal {
+                return this.signal()
+            }
+        }
+
+        const vm = new VM()
+        drive(vm).onModuleMount()
+        const first = vm.expose()
+        expect(first.aborted).toBe(false)
+
+        drive(vm).onModuleUnmount()
+        expect(first.aborted).toBe(true)
+
+        // A new controller, not the aborted one handed back: the next mount's requests are not born dead.
+        drive(vm).onModuleMount()
+        const second = vm.expose()
+        expect(second).not.toBe(first)
+        expect(second.aborted).toBe(false)
+    })
+
+    it("releases even when onUnmount throws", () => {
+        const dispose = vi.fn()
+
+        class VM extends ViewModel {
+            protected override onMount(): void {
+                this.track(dispose)
+            }
+            protected override onUnmount(): void {
+                throw new Error("unmount blew up")
+            }
+        }
+
+        const vm = new VM()
+        drive(vm).onModuleMount()
+
+        expect(() => drive(vm).onModuleUnmount()).toThrowError("unmount blew up")
         expect(dispose).toHaveBeenCalledTimes(1)
     })
 })

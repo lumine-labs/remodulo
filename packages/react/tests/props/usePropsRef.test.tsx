@@ -485,3 +485,126 @@ describe("usePropsRef token isolation", () => {
         expect(screen.getByTestId("child").textContent).toBe("child")
     })
 })
+
+// A subclass token builds the SUBCLASS
+// ========================================
+//
+// A `PropsRef` subclass used as its own token is the typed way to give a bridge methods of its own:
+// `inject(EditorPropsRef)` is declared to hand back an `EditorPropsRef`. That only holds if the hook
+// constructs the class it registers under. It used to construct the base and register it under the
+// subclass token, so the injected value failed `instanceof` and every subclass method was `undefined`
+// while the types promised otherwise — a mismatch nothing caught until the method was called.
+
+class EditorPropsRef extends PropsRef<Data> {
+    describe(): string {
+        return `label:${this.current.label}`
+    }
+}
+
+describe("usePropsRef with a subclass token", () => {
+    it("constructs the token class, so the ref IS an instance of it", () => {
+        const captured: { ref?: PropsRef<Data>; provide?: unknown } = {}
+
+        function Harness() {
+            const { ref, provider } = usePropsRef<Data>({ label: "a", count: 1 }, { token: EditorPropsRef })
+            captured.ref = ref
+            captured.provide = provider.provide
+            return null
+        }
+
+        render(<Harness />)
+
+        expect(captured.provide).toBe(EditorPropsRef)
+        expect(captured.ref).toBeInstanceOf(EditorPropsRef)
+        // Still a PropsRef, so everything the base offers is there too.
+        expect(captured.ref).toBeInstanceOf(PropsRef)
+    })
+
+    it("hands the injected value the subclass's own methods", () => {
+        let described: string | null = null
+        let injected: EditorPropsRef | null = null
+
+        function Probe() {
+            injected = useResolve(EditorPropsRef)
+            described = injected.describe()
+            return null
+        }
+
+        function Harness() {
+            const { provider } = usePropsRef<Data>({ label: "a", count: 1 }, { token: EditorPropsRef })
+            return (
+                <Root providers={[provider]}>
+                    <Probe />
+                </Root>
+            )
+        }
+
+        render(<Harness />)
+
+        expect(injected).toBeInstanceOf(EditorPropsRef)
+        expect(described).toBe("label:a")
+    })
+
+    it("keeps the subclass instance live across updates, like any other bridge", () => {
+        let setLabel: ((value: string) => void) | null = null
+        const resolved: EditorPropsRef[] = []
+
+        function Probe() {
+            resolved.push(useResolve(EditorPropsRef))
+            return null
+        }
+
+        function Harness() {
+            const [label, setLabelState] = useState("a")
+            setLabel = setLabelState
+
+            const { provider } = usePropsRef<Data>({ label, count: 1 }, { token: EditorPropsRef })
+            return (
+                <Root providers={[provider]}>
+                    <Probe />
+                </Root>
+            )
+        }
+
+        render(<Harness />)
+        expect(resolved[0]?.describe()).toBe("label:a")
+
+        act(() => setLabel?.("b"))
+
+        // One instance throughout — the subclass gets the same identity contract the base has — and its
+        // own method reads the newly committed props.
+        expect(new Set(resolved).size).toBe(1)
+        expect(resolved[0]?.describe()).toBe("label:b")
+    })
+
+    it("leaves the symbol-token path constructing the base PropsRef", () => {
+        const TOKEN: InjectionToken<PropsRef<Data>> = Symbol.for("tests.props.symbol-still-base")
+        const captured: { ref?: PropsRef<Data> } = {}
+
+        function Harness() {
+            const { ref } = usePropsRef<Data>({ label: "a", count: 1 }, { token: TOKEN })
+            captured.ref = ref
+            return null
+        }
+
+        render(<Harness />)
+
+        expect(captured.ref).toBeInstanceOf(PropsRef)
+        expect(captured.ref).not.toBeInstanceOf(EditorPropsRef)
+    })
+
+    it("still constructs the base when no token is given at all", () => {
+        const captured: { ref?: PropsRef<Data> } = {}
+
+        function Harness() {
+            const { ref } = usePropsRef<Data>({ label: "a", count: 1 })
+            captured.ref = ref
+            return null
+        }
+
+        render(<Harness />)
+
+        expect(captured.ref).toBeInstanceOf(PropsRef)
+        expect(captured.ref).not.toBeInstanceOf(EditorPropsRef)
+    })
+})
