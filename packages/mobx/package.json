@@ -1,6 +1,6 @@
 {
     "name": "@remodulo/mobx",
-    "version": "0.3.0",
+    "version": "0.3.1",
     "description": "MobX companion for @remodulo/react",
     "license": "MIT",
     "author": "Egor Arkhipov (Lumine Labs)",

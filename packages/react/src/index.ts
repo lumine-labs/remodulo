@@ -10,6 +10,7 @@ export { ModuleStatus } from "./core/module-lifecycle.types.js"
 export { AppProvider } from "./react/AppProvider.js"
 export { ModuleProvider } from "./react/ModuleProvider.js"
 export { createModuleComponent } from "./react/createModuleComponent.js"
+export { withModule } from "./react/withModule.js"
 
 // Features
 // ========================================

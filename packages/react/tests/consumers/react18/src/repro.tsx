@@ -31,7 +31,7 @@
 // additionally scans the installed `dist` of both packages for the string.
 
 import { useState } from "react"
-import type { ComponentType, ReactElement, ReactNode } from "react"
+import type { ComponentProps, ComponentType, ReactElement, ReactNode } from "react"
 
 import {
     App,
@@ -53,6 +53,7 @@ import {
     useResolveAll,
     useResolveOptional,
     useResolver,
+    withModule,
 } from "@remodulo/react"
 
 // The `./types` subpath has to carry the whole type surface on its own — a consumer that only wants
@@ -1955,6 +1956,39 @@ type _ResolutionCodeLiteral = Expect<Equals<typeof RESOLUTION_ERROR_CODE, "REMOD
 type _CycleCodeLiteral = Expect<Equals<typeof CYCLE_ERROR_CODE, "REMODULO/CYCLE">>
 type _InjectionContextCodeLiteral = Expect<Equals<typeof INJECTION_CONTEXT_ERROR_CODE, "REMODULO/INJECTION_CONTEXT">>
 
+// withModule — the module/view combinator
+// ========================================
+//
+// The module keeps its own props; the view contributes only its children slot. A view may declare
+// `children` or nothing at all, and the constraint refuses everything else — an extra prop could never be
+// passed, since the composition renders `<View>{children}</View>` and nothing more.
+
+const ComposedShell = withModule(UserModule, ({ children }: { children?: ReactNode }) => <>{children}</>)
+const ComposedBare = withModule(UserModule, () => null)
+
+// Module props stay required and the children slot follows the view.
+type _ComposedTakesModuleProps = Expect<Equals<ComponentProps<typeof ComposedShell>["userId"], string>>
+type _ComposedTakesTheViewsChildren = Expect<
+    Equals<ComponentProps<typeof ComposedShell>["children"], ReactNode | undefined>
+>
+type _ComposedBareHasNoChildren = Expect<Not<HasKey<ComponentProps<typeof ComposedBare>, "children">>>
+
+const _composedUsage = (
+    <ComposedShell userId="u1" limit={10}>
+        <span />
+    </ComposedShell>
+)
+const _composedBareUsage = <ComposedBare userId="u1" />
+
+function withModuleRefusesAViewThatNeedsMore(): void {
+    // @ts-expect-error an optional extra is still an extra — the view could never be given one.
+    withModule(UserModule, (_: { children?: ReactNode; className?: string }) => null)
+
+    // @ts-expect-error and a required one could never be satisfied.
+    withModule(UserModule, (_: { children?: ReactNode; label: string }) => null)
+}
+void withModuleRefusesAViewThatNeedsMore
+
 // The published surface, counted.
 // ========================================
 //
@@ -1982,6 +2016,7 @@ const publicValueSurface = [
     Ref,
     RefMap,
     ModuleStatus,
+    withModule,
 ] as const
 // 31 -> 31 across the 0.10.0 kernel rework, which is a coincidence worth stating rather than evidence
 // that nothing moved: SIX decorator exports left (`Inject`, `InjectAll`, `Injectable`, `Optional`,
@@ -1998,13 +2033,15 @@ const publicValueSurface = [
 // 31 -> 42 when the owner ruled that a peer dependency should never need a second import path.
 // Still 42 after `useContainer` left and `useResolver` arrived: a one-for-one swap of the module's write
 // door for its read one, so the LIST is again what carries the meaning and not the number.
+// 19 -> 20 with `withModule`, the module/view combinator — react's own, and the first ARRIVAL since the
+// reversal below rather than another departure.
 // 42 -> 19 when that ruling was REVERSED: a peer dependency is already a direct dependency of the app, so
 // re-exporting it bought a second spelling for every kernel name and nothing else. Everything whose
 // implementation lives in `@remodulo/container` left in one go — the container and the mode enums, the
 // five ambient readers plus `runInInjectionContext`, `Resolver`, the tokenizer, `describeToken`,
 // `ContainerEvent`, and the four errors with their four codes. What remains is what this package OWNS,
 // which is the point of the list: react's modules, its hooks, its primitives and its lifecycle alphabet.
-type _PublicValueSurfaceSize = Expect<Equals<typeof publicValueSurface.length, 19>>
+type _PublicValueSurfaceSize = Expect<Equals<typeof publicValueSurface.length, 20>>
 
 // The `./types` subpath must carry the entire public type surface. Every exported name is referenced
 // once.
