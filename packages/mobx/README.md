@@ -17,7 +17,7 @@ reactivity-agnostic; this is where the two libraries meet.
 npm install @remodulo/mobx
 ```
 
-Peers: `@remodulo/react` `^0.12.0`, `@remodulo/container` `^0.3.0`, `mobx` `^6.0.0`, `react` `^18.0.0 || ^19.0.0`. No `reflect-metadata`, no
+Peers: `@remodulo/react` `^0.12.0`, `@remodulo/container` `^0.3.0`, `mobx` `^6.0.0 || ^7.0.0`, `react` `^18.0.0 || ^19.0.0`. No `reflect-metadata`, no
 decorators, no compiler flags — dependencies arrive as `inject()` fields, exactly as in the core.
 
 ## Example
