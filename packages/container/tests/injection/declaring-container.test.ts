@@ -177,7 +177,7 @@ describe("inject modes", () => {
     it("refuses an inherited token under self, exactly as resolve does", () => {
         const { child } = chain()
         class Probe {
-            readonly value = inject<string>(TOKEN, "self")
+            readonly value = inject<string>(TOKEN, { mode: "self" })
         }
         child.register(Probe)
 
@@ -190,7 +190,7 @@ describe("inject modes", () => {
         const { child } = chain()
         child.register({ provide: TOKEN, useValue: "child" })
         class Probe {
-            readonly value = inject<string>(TOKEN, "self")
+            readonly value = inject<string>(TOKEN, { mode: "self" })
         }
         child.register(Probe)
 
@@ -201,7 +201,7 @@ describe("inject modes", () => {
         const { child } = chain()
         class Probe {
             readonly nearest = injectOptional<string>(TOKEN)
-            readonly own = injectOptional<string>(TOKEN, "self")
+            readonly own = injectOptional<string>(TOKEN, { mode: "self" })
         }
         child.register(Probe)
 
@@ -213,8 +213,8 @@ describe("inject modes", () => {
     it("accepts an enum member and a bare literal alike", () => {
         const { child } = chain()
         class Probe {
-            readonly member = inject<string>(TOKEN, ResolveMode.Nearest)
-            readonly literal = inject<string>(TOKEN, "nearest")
+            readonly member = inject<string>(TOKEN, { mode: ResolveMode.Nearest })
+            readonly literal = inject<string>(TOKEN, { mode: "nearest" })
         }
         child.register(Probe)
 
@@ -240,7 +240,7 @@ describe("injectAll modes", () => {
     function collect(container: Container, mode?: ResolveAllMode): string[] {
         const token = Symbol("COLLECTOR")
         const Collector = class {
-            readonly plugins = mode === undefined ? injectAll<string>(PLUGINS) : injectAll<string>(PLUGINS, mode)
+            readonly plugins = mode === undefined ? injectAll<string>(PLUGINS) : injectAll<string>(PLUGINS, { mode })
         }
         container.register({ provide: token, useClass: Collector })
 

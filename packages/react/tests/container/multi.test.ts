@@ -894,7 +894,8 @@ describe("Resolver parity", () => {
 describe("injectAll parity", () => {
     function collector(token: symbol, mode?: ResolveAllMode): Constructor<{ plugins: string[] }> {
         const Collector = class {
-            readonly plugins: string[] = mode === undefined ? injectAll<string>(token) : injectAll<string>(token, mode)
+            readonly plugins: string[] =
+                mode === undefined ? injectAll<string>(token) : injectAll<string>(token, { mode })
         }
 
         return Collector as unknown as Constructor<{ plugins: string[] }>
@@ -1017,24 +1018,24 @@ describe("factory body read parity", () => {
 
         expect(injected(leaf, () => injectAll(TOKEN))).toEqual(["leaf", "root"])
         expect(injected(leaf, () => injectAll(TOKEN))).toEqual(leaf.resolveAll(TOKEN))
-        expect(injected(leaf, () => injectAll(TOKEN, ResolveAllMode.Chained))).toEqual(["leaf", "root"])
+        expect(injected(leaf, () => injectAll(TOKEN, { mode: ResolveAllMode.Chained }))).toEqual(["leaf", "root"])
     })
 
     it("means by self and nearest exactly what resolveAll means by them", () => {
         const { leaf, bare } = chain()
 
-        expect(injected(leaf, () => injectAll(TOKEN, "self"))).toEqual(["leaf"])
-        expect(injected(leaf, () => injectAll(TOKEN, "nearest"))).toEqual(["leaf"])
+        expect(injected(leaf, () => injectAll(TOKEN, { mode: "self" }))).toEqual(["leaf"])
+        expect(injected(leaf, () => injectAll(TOKEN, { mode: "nearest" }))).toEqual(["leaf"])
 
         // The distinction the two modes exist for. `bare` declares nothing: `self` is own-only and reads
         // `[]`, `nearest` falls back to the nearest CONTRIBUTOR's own bindings — `leaf` alone, never the
         // chain above it, which is what `chained` is for.
-        expect(injected(bare, () => injectAll(TOKEN, "self"))).toEqual([])
-        expect(injected(bare, () => injectAll(TOKEN, "nearest"))).toEqual(["leaf"])
+        expect(injected(bare, () => injectAll(TOKEN, { mode: "self" }))).toEqual([])
+        expect(injected(bare, () => injectAll(TOKEN, { mode: "nearest" }))).toEqual(["leaf"])
         expect(injected(bare, () => injectAll(TOKEN))).toEqual(["leaf", "root"])
 
         for (const mode of ["self", "nearest", "chained"] as const) {
-            expect(injected(bare, () => injectAll(TOKEN, mode))).toEqual(bare.resolveAll(TOKEN, mode))
+            expect(injected(bare, () => injectAll(TOKEN, { mode }))).toEqual(bare.resolveAll(TOKEN, mode))
         }
     })
 
@@ -1052,7 +1053,7 @@ describe("factory body read parity", () => {
         const child = root.fork()
 
         expect(injected(child, () => inject(SINGLE))).toBe("root")
-        expect(injected(child, () => inject(SINGLE, "nearest"))).toBe("root")
+        expect(injected(child, () => inject(SINGLE, { mode: "nearest" }))).toBe("root")
     })
 
     it("carries self onto the single reads too, throwing or not exactly as they do", () => {
@@ -1061,11 +1062,11 @@ describe("factory body read parity", () => {
         root.register({ provide: SINGLE, useValue: "root" })
         const child = root.fork()
 
-        expect(injected(root, () => inject(SINGLE, "self"))).toBe("root")
-        expect(() => injected(child, () => inject(SINGLE, "self"))).toThrow(
+        expect(injected(root, () => inject(SINGLE, { mode: "self" }))).toBe("root")
+        expect(() => injected(child, () => inject(SINGLE, { mode: "self" }))).toThrow(
             messageOf(() => child.resolve(SINGLE, "self"))
         )
-        expect(injected(child, () => injectOptional(SINGLE, "self"))).toBeUndefined()
+        expect(injected(child, () => injectOptional(SINGLE, { mode: "self" }))).toBeUndefined()
     })
 
     it("routes the optional read to the safe read, and only that one", () => {
@@ -1107,7 +1108,7 @@ describe("factory body read parity", () => {
         registerProviders(leaf, [
             {
                 provide: HOST,
-                useFactory: () => [inject(SINGLE), injectOptional(MISSING), injectAll(TOKEN, "self")],
+                useFactory: () => [inject(SINGLE), injectOptional(MISSING), injectAll(TOKEN, { mode: "self" })],
             },
         ])
 

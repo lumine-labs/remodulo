@@ -209,6 +209,46 @@ describe("emitted declarations", () => {
         }
     })
 
+    it("publishes the read family as `(token, params?)`, with `delayed` a literal-true overload", () => {
+        // The overload PAIR is the contract: the literal arm returns a thunk, the other returns the value,
+        // and `delayed?: never` on the eager arm is what refuses a computed flag rather than answering it
+        // with the wrong return type. The positional mode spelling is gone from all three readers.
+        const injector = declaration("injector.d.ts")
+
+        /** One overload, from its head to the `;` that closes it. */
+        const overload = (head: string, occurrence: 0 | 1): string => {
+            const first = injector.indexOf(head)
+            const start = occurrence === 0 ? first : injector.indexOf(head, first + 1)
+            return injector.slice(start, injector.indexOf(";", injector.indexOf("}):", start)))
+        }
+
+        const delayedInject = overload("export declare function inject<T>(", 0)
+        expect(delayedInject).toContain("params: {")
+        expect(delayedInject).toContain("mode?: ResolveMode;")
+        expect(delayedInject).toContain("delayed: true;")
+        expect(delayedInject).toContain("}): () => T")
+
+        const eagerInject = overload("export declare function inject<T>(", 1)
+        expect(eagerInject).toContain("params?: {")
+        expect(eagerInject).toContain("delayed?: never;")
+        expect(eagerInject).toContain("}): T")
+
+        const delayedAll = overload("export declare function injectAll<T>(", 0)
+        expect(delayedAll).toContain("mode?: ResolveAllMode;")
+        expect(delayedAll).toContain("delayed: true;")
+        expect(delayedAll).toContain("}): () => T[]")
+
+        const delayedOptional = overload("export declare function injectOptional<T>(", 0)
+        expect(delayedOptional).toContain("delayed: true;")
+        expect(delayedOptional).toContain("}): () => T | undefined")
+
+        // The positional spelling and the standalone reader are both gone.
+        expect(injector).not.toContain("mode?: ResolveMode): T;")
+        expect(injector).not.toContain("mode?: ResolveAllMode): T[];")
+        expect(injector).not.toContain("injectDelayed")
+        expect(declaration("index.d.ts")).not.toContain("injectDelayed")
+    })
+
     it("publishes injectResolver as a no-argument reader returning the Resolver", () => {
         // Same shape as `injectContainer` and for the same reason — the frame's anchor is not something a
         // caller selects — and the return type is the difference between the two doors: the read-and-observe

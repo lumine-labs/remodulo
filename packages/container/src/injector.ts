@@ -14,19 +14,49 @@ function requireFrame(caller: string, token?: InjectionToken): Frame {
 // Injection
 // ========================================
 
+type InjectParams = { mode?: ResolveMode; delayed?: true }
+type InjectAllParams = { mode?: ResolveAllMode; delayed?: true }
+
 /** One value from the declaring container, required. */
-export function inject<T>(token: InjectionToken<T>, mode: ResolveMode = "nearest"): T {
-    return requireFrame("inject", token).container.resolve<T>(token, mode)
+export function inject<T>(token: InjectionToken<T>, params: { mode?: ResolveMode; delayed: true }): () => T
+export function inject<T>(token: InjectionToken<T>, params?: { mode?: ResolveMode; delayed?: never }): T
+export function inject<T>(token: InjectionToken<T>, params?: InjectParams): T | (() => T) {
+    const { container } = requireFrame("inject", token)
+    const mode = params?.mode ?? "nearest"
+
+    if (params?.delayed !== true) return container.resolve<T>(token, mode)
+    return () => container.resolve<T>(token, mode)
 }
 
 /** One value from the declaring container, `undefined` when nothing is registered. */
-export function injectOptional<T>(token: InjectionToken<T>, mode: ResolveMode = "nearest"): T | undefined {
-    return requireFrame("injectOptional", token).container.resolveOptional<T>(token, mode)
+export function injectOptional<T>(
+    token: InjectionToken<T>,
+    params: { mode?: ResolveMode; delayed: true }
+): () => T | undefined
+export function injectOptional<T>(
+    token: InjectionToken<T>,
+    params?: { mode?: ResolveMode; delayed?: never }
+): T | undefined
+export function injectOptional<T>(
+    token: InjectionToken<T>,
+    params?: InjectParams
+): (T | undefined) | (() => T | undefined) {
+    const { container } = requireFrame("injectOptional", token)
+    const mode = params?.mode ?? "nearest"
+
+    if (params?.delayed !== true) return container.resolveOptional<T>(token, mode)
+    return () => container.resolveOptional<T>(token, mode)
 }
 
 /** A collection from the declaring container. */
-export function injectAll<T>(token: InjectionToken<T>, mode: ResolveAllMode = "chained"): T[] {
-    return requireFrame("injectAll", token).container.resolveAll<T>(token, mode)
+export function injectAll<T>(token: InjectionToken<T>, params: { mode?: ResolveAllMode; delayed: true }): () => T[]
+export function injectAll<T>(token: InjectionToken<T>, params?: { mode?: ResolveAllMode; delayed?: never }): T[]
+export function injectAll<T>(token: InjectionToken<T>, params?: InjectAllParams): T[] | (() => T[]) {
+    const { container } = requireFrame("injectAll", token)
+    const mode = params?.mode ?? "chained"
+
+    if (params?.delayed !== true) return container.resolveAll<T>(token, mode)
+    return () => container.resolveAll<T>(token, mode)
 }
 
 /** The declaring container itself, for the rare consumer that needs the container and not a value. */

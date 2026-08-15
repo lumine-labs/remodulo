@@ -34,7 +34,7 @@ function collector(mode?: "nearest" | "chained"): Provider & { seen: string[][] 
     const Collector = class {
         static seen = seen
         readonly plugins: { label: string }[] =
-            mode === undefined ? injectAll(PLUGINS) : injectAll(PLUGINS, mode)
+            mode === undefined ? injectAll(PLUGINS) : injectAll(PLUGINS, { mode })
 
         constructor() {
             seen.push(this.plugins.map((plugin) => plugin.label))

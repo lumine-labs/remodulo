@@ -531,8 +531,8 @@ class Diagnostics {
 // collection read takes — one semantics parameterized uniformly, not a second option channel.
 class PluginRegistry {
     readonly plugins = injectAll(PLUGIN)
-    readonly chainedPlugins = injectAll(PLUGIN, "chained")
-    readonly ownPlugins = injectAll(PLUGIN, ResolveAllMode.Self)
+    readonly chainedPlugins = injectAll(PLUGIN, { mode: "chained" })
+    readonly ownPlugins = injectAll(PLUGIN, { mode: ResolveAllMode.Self })
     readonly api = inject(ApiClient)
 
     names(): string[] {
@@ -558,21 +558,27 @@ export function probeInjection(container: Container): string {
         const config = inject(CONFIG)
         type _InjectByToken = Expect<Equals<typeof config, AppConfig>>
 
-        const ownConfig = inject(CONFIG, "self")
-        type _InjectMode = Expect<Equals<Parameters<typeof inject>[1], ResolveMode | undefined>>
+        const ownConfig = inject(CONFIG, { mode: "self" })
+        type _InjectParams = Expect<
+            Equals<Parameters<typeof inject>[1], { mode?: ResolveMode; delayed?: never } | undefined>
+        >
 
-        const maybeLogger = injectOptional(LOGGER, ResolveMode.Nearest)
+        const maybeLogger = injectOptional(LOGGER, { mode: ResolveMode.Nearest })
         type _InjectOptional = Expect<Equals<typeof maybeLogger, Logger | undefined>>
-        type _InjectOptionalMode = Expect<Equals<Parameters<typeof injectOptional>[1], ResolveMode | undefined>>
+        type _InjectOptionalParams = Expect<
+            Equals<Parameters<typeof injectOptional>[1], { mode?: ResolveMode; delayed?: never } | undefined>
+        >
 
         const plugins = injectAll(PLUGIN)
         type _InjectAll = Expect<Equals<typeof plugins, Plugin[]>>
 
         // Unlike the parameter decorator it replaced, the function carries the WHOLE mode set: own-only
         // injection is expressible now, because there is no planner between the call and the container.
-        const ownPlugins = injectAll(PLUGIN, "self")
+        const ownPlugins = injectAll(PLUGIN, { mode: "self" })
         type _InjectAllSelf = Expect<Equals<typeof ownPlugins, Plugin[]>>
-        type _InjectAllMode = Expect<Equals<Parameters<typeof injectAll>[1], ResolveAllMode | undefined>>
+        type _InjectAllParams = Expect<
+            Equals<Parameters<typeof injectAll>[1], { mode?: ResolveAllMode; delayed?: never } | undefined>
+        >
 
         const own = injectContainer()
         type _InjectContainer = Expect<Equals<typeof own, Container>>
@@ -619,7 +625,7 @@ export function probeInjection(container: Container): string {
 }
 
 // @ts-expect-error a single read has two modes; `chained` is a collection width.
-void inject(PLUGIN, "chained")
+void inject(PLUGIN, { mode: "chained" })
 
 // @ts-expect-error the same for the optional single read.
 void injectOptional(PLUGIN, ResolveAllMode.Chained)
@@ -991,7 +997,7 @@ void provideLessMultiValue
 
 const collectingFactory: FactoryProvider<Plugin[]> = {
     provide: consumerTokenizer<Plugin[]>("plugin.snapshot"),
-    useFactory: () => injectAll(PLUGIN, "nearest"),
+    useFactory: () => injectAll(PLUGIN, { mode: "nearest" }),
 }
 void collectingFactory
 
@@ -999,7 +1005,7 @@ void collectingFactory
 // collection arm too, but the single arm never had it, and `injectAll` is now the only place it is spelled.
 const chainedCollectingFactory: FactoryProvider<Plugin[]> = {
     provide: consumerTokenizer<Plugin[]>("plugin.chained"),
-    useFactory: () => injectAll(PLUGIN, ResolveAllMode.Chained),
+    useFactory: () => injectAll(PLUGIN, { mode: ResolveAllMode.Chained }),
 }
 void chainedCollectingFactory
 
