@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process"
-import { mkdtempSync, readFileSync, rmSync } from "node:fs"
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -9,11 +9,10 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest"
 // The published surface.
 // ========================================
 //
-// `ViewModel`'s seal has two layers, and this file pins the one a consumer's compiler enforces. The four
-// `onModule*` hooks are declared `private`, so the emitted `.d.ts` carries them as `private onModuleX;` —
-// present, unusable, and impossible for a subclass to redeclare. They used to be `@internal` and stripped
-// entirely, which left an override INVISIBLE to the compiler: a subclass could redeclare one, the base's
-// runtime seal would throw at construction, and nothing said so until the app ran.
+// What this package emits, and nothing it merely re-exported. `ViewModel` moved to
+// `@remodulo/view-model`, which carries its own declarations gate for the two-layer seal — so the pins
+// here are the ones only this package can break: the wrapper factory's signature, where the encapsulation
+// IS the type.
 //
 // This compiles the real build config into a throwaway directory, the same way the kernel's declarations
 // gate does, so the pin costs nothing that `pnpm run build` does not already do.
@@ -44,31 +43,44 @@ afterAll(() => {
 })
 
 describe("emitted declarations", () => {
-    it("publishes the four sealed hooks as `private`, so an override is a compile error", () => {
-        const viewModel = declaration("ViewModel.d.ts")
+    it("no longer emits `ViewModel` or the type barrel it re-exported", () => {
+        // The relocation to `@remodulo/view-model` is only real if this package stops shipping the class.
+        // A stray re-export would put a second `ViewModel` identity on consumers' disk.
+        expect(existsSync(join(outDir, "ViewModel.d.ts"))).toBe(false)
+        expect(existsSync(join(outDir, "types.d.ts"))).toBe(false)
 
-        for (const hook of ["onModuleInit", "onModuleMount", "onModuleUnmount", "onModuleDestroy"]) {
-            expect(viewModel).toContain(`private ${hook};`)
+        const index = declaration("index.d.ts")
+        expect(index).not.toContain("ViewModel")
+        expect(index).not.toContain("Disposer")
+    })
+
+    it("publishes `createMobxModuleComponent` DERIVED from the base factory, with `adapter` omitted", () => {
+        // Two pins in one line. The encapsulation IS the type: a consumer who can still pass `adapter` has
+        // the same hand-wiring problem the wrapper exists to remove. And the signature is read off
+        // `createModuleComponent` with instantiation expressions rather than restated — so the emitted form
+        // spells `Parameters`/`ReturnType`, and a base-factory change reaches consumers instead of being
+        // silently absorbed by a hand-copied duplicate that still compiles.
+        const factory = declaration("createMobxModuleComponent.d.ts")
+
+        expect(factory).toContain(
+            "type FactoryArgs<P extends object, T extends object> = " +
+                "Parameters<typeof createModuleComponent<P, T>>;"
+        )
+        expect(factory).toContain(
+            "export declare function createMobxModuleComponent<P extends object = {}, T extends object = P>" +
+                "(config?: FactoryArgs<P, T>[0], " +
+                'props?: Omit<NonNullable<FactoryArgs<P, T>[1]>, "adapter">): ' +
+                "ReturnType<typeof createModuleComponent<P, T>>;"
+        )
+        // The derivation shrinks the type-import surface to a single name — the base factory itself.
+        // `ModuleConfig`, `PropsBridgeOptions`, `ComponentType` and `ReactNode` are no longer named here.
+        expect(factory).toContain('import { createModuleComponent } from "@remodulo/react";')
+        for (const restated of ["ModuleConfig", "PropsBridgeOptions", "ComponentType", "ReactNode"]) {
+            expect(factory).not.toContain(restated)
         }
-    })
 
-    it("publishes the four shorthands as `protected`, with an async-capable onDestroy", () => {
-        // The other half of the pair: what a subclass overrides INSTEAD. `onDestroy` is the only one the
-        // module awaits, so it is the only one that may return a promise.
-        const viewModel = declaration("ViewModel.d.ts")
-
-        expect(viewModel).toContain("protected onInit?(): void;")
-        expect(viewModel).toContain("protected onMount?(): void;")
-        expect(viewModel).toContain("protected onUnmount?(): void;")
-        expect(viewModel).toContain("protected onDestroy?(): void | Promise<void>;")
-    })
-
-    it("keeps the disposer plumbing protected and the state private", () => {
-        const viewModel = declaration("ViewModel.d.ts")
-
-        expect(viewModel).toContain("protected signal(): AbortSignal;")
-        expect(viewModel).toContain("protected track<T extends Disposer>(disposer: T): T;")
-        // `#private` is the whole of the instance state on the published surface.
-        expect(viewModel).toContain("#private;")
+        expect(declaration("index.d.ts")).toContain(
+            'export { createMobxModuleComponent } from "./createMobxModuleComponent.js";'
+        )
     })
 })

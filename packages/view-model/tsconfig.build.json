@@ -1,0 +1,22 @@
+{
+    "extends": "./tsconfig.json",
+    "compilerOptions": {
+        "target": "ES2022",
+        "module": "NodeNext",
+        "moduleResolution": "NodeNext",
+
+        "noEmit": false,
+        // Without this, `tsc` writes a complete, well-formed `dist` out of source that does not compile —
+        // and every downstream gate then passes against declarations nobody could have built.
+        "noEmitOnError": true,
+        "declaration": true,
+        "declarationMap": true,
+        "sourceMap": true,
+
+        // No `stripInternal` here, deliberately. The seal is `private` members, which the compiler emits on
+        // their own as `private onModuleInit;` and friends — that IS the compile-time seal, and stripping
+        // would be the thing that breaks it. `tests/build/declarations.test.ts` pins their presence.
+
+        "outDir": "dist"
+    }
+}

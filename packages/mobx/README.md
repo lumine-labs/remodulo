@@ -2,9 +2,13 @@
 
 **MobX companion for [`@remodulo/react`](https://www.npmjs.com/package/@remodulo/react).**
 
-Three values: a `PropsAdapter` that bridges React props into a stable MobX observable, a base class that owns
-disposers, and a `makeAutoObservable` that works across a class hierarchy. The core stays
-reactivity-agnostic; this is where the two libraries meet.
+A module-component factory with the props bridge already wired, the `PropsAdapter` behind it, and a
+`makeAutoObservable` that works across a class hierarchy. The core stays reactivity-agnostic; this is where
+the two libraries meet.
+
+Pairs with [`@remodulo/view-model`](https://www.npmjs.com/package/@remodulo/view-model), which owns the
+`ViewModel` base class this package's annotation walk is built to tolerate. Install it if you want one; it
+is not required, and not a peer.
 
 > ⚠️ **Experimental / internal use.**
 >
@@ -17,15 +21,18 @@ reactivity-agnostic; this is where the two libraries meet.
 npm install @remodulo/mobx
 ```
 
-Peers: `@remodulo/react` `^0.12.0`, `@remodulo/container` `^0.3.0`, `mobx` `^6.0.0 || ^7.0.0`, `react` `^18.0.0 || ^19.0.0`. No `reflect-metadata`, no
-decorators, no compiler flags — dependencies arrive as `inject()` fields, exactly as in the core.
+Peers: `@remodulo/react` `^0.13.0` and `mobx` `^6.0.0 || ^7.0.0` — the two things this package actually
+imports. `react` and `@remodulo/container` are **not** peers here; they arrive with `@remodulo/react`, as
+its own. No `reflect-metadata`, no decorators, no compiler flags — dependencies arrive as `inject()`
+fields, exactly as in the core.
 
 ## Example
 
 ```tsx
 import { inject, makeTokenizer } from "@remodulo/container"
-import { ViewModel, makeInheritedAutoObservable, mobxProps } from "@remodulo/mobx"
-import { PropsRef, createModuleComponent } from "@remodulo/react"
+import { createMobxModuleComponent, makeInheritedAutoObservable } from "@remodulo/mobx"
+import { PropsRef } from "@remodulo/react"
+import { ViewModel } from "@remodulo/view-model"
 import { autorun, runInAction } from "mobx"
 
 type ChartProps = { series: string; window: number }
@@ -54,26 +61,24 @@ class ChartStore extends ViewModel {
     }
 }
 
-export const ChartModule = createModuleComponent<ChartProps>(
-    { providers: [ChartStore] },
-    { adapter: mobxProps<ChartProps>(), token: ChartPropsRef }
-)
+export const ChartModule = createMobxModuleComponent<ChartProps>({ providers: [ChartStore] }, { token: ChartPropsRef })
 ```
 
 The store reads its props inside a reaction and never hears about React at all. The `PropsRef` subclass is
 what types them: the bridge's `token` registers the bridged observable under `ChartPropsRef`, so
 `inject(ChartPropsRef)` returns a ref whose `current` is `ChartProps` and not `unknown`.
 
-- **`mobxProps()`** — a `PropsAdapter` that mints one shallow observable and mutates it in place on every
-  real props change, inside a `runInAction`. The identity never changes, so reactions stay attached. Keys the
-  parent stops passing are removed.
-- **`ViewModel`** — `track(disposer)` and a lazy `AbortSignal`, released in reverse order at **unmount**,
-  so what a mount acquires the matching unmount lets go and a remount starts clean. Destroy is the backstop
-  for a module that never mounted. `onDestroy` may be async and is awaited. It does **no** MobX annotation
-  of its own; annotate in your own constructor.
-  The base owns all four `onModule*` hooks and **seals** them: override `onInit()`, `onMount()`,
-  `onUnmount()` or `onDestroy()` instead — all optional, no `super` call. Redefining an `onModule*` throws
-  at construction rather than silently dropping the teardown that runs after your `onDestroy()`.
+- **`createMobxModuleComponent(config?, props?)`** — `@remodulo/react`'s `createModuleComponent` with the
+  MobX bridge already wired. Identical signature except the props param takes `use` and `token` only: the
+  `adapter` slot belongs to the factory, which mints one per component at definition time, where the
+  identity has to be fixed. `config` passes through verbatim, object form and function-of-enriched-props
+  form alike.
+- **`mobxProps()`** — the `PropsAdapter` underneath, for composing by hand: pass it as
+  `createModuleComponent(config, { adapter: mobxProps<T>(), ... })` when you need the base factory (a
+  non-MobX adapter alongside, your own wrapper). Hoist it — an adapter recreated per render rebuilds the
+  target. It mints one shallow observable and mutates it in place on every real props change, inside a
+  `runInAction`. The identity never changes, so reactions stay attached. Keys the parent stops passing are
+  removed.
 - **`makeInheritedAutoObservable(target, overrides?, options?)`** — MobX's own
   [refuses any class with a superclass](https://mobx.js.org/subclassing.html#limitations); this walks the
   prototype chain instead. Call it exactly once per instance, in the most derived constructor. Injected

@@ -1,8 +1,8 @@
+import { ViewModel } from "@remodulo/view-model"
 import { $mobx, autorun, isAction, isComputedProp, isObservableProp, makeObservable, runInAction } from "mobx"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 
 import { makeInheritedAutoObservable } from "../src/makeInheritedAutoObservable"
-import { ViewModel } from "../src/ViewModel"
 
 class PlainBase {
     inherited = "base"
@@ -715,5 +715,73 @@ describe("makeInheritedAutoObservable: sealed ViewModel hooks", () => {
         // MobX makes them actions. Only the four lifecycle entry points are held back.
         expect(keys).toContain("signal")
         expect(keys).toContain("track")
+    })
+})
+
+// Interaction with makeInheritedAutoObservable
+// ========================================
+//
+// `ViewModel` itself lives in `@remodulo/view-model` and is tested there against no reactivity library at
+// all. What stays here is the half that only exists at the seam: what the annotation walk does to a view
+// model, and that the base's disposal still works once MobX has been through it.
+
+const HOOKS = ["onModuleInit", "onModuleMount", "onModuleUnmount", "onModuleDestroy"] as const
+
+/**
+ * The module calls the four hooks by looking them up at RUNTIME — it never names their types — so a suite
+ * that drives a view model by hand has to reach past the `private` modifier the same way.
+ */
+type Driven = { [K in (typeof HOOKS)[number]]: () => unknown }
+const drive = (vm: ViewModel): Driven => vm as unknown as Driven
+
+describe("ViewModel: observability", () => {
+    class CounterVM extends ViewModel {
+        count = 1
+
+        constructor() {
+            super()
+            makeInheritedAutoObservable(this, {}, { autoBind: true })
+        }
+
+        inc(): void {
+            this.count++
+        }
+
+        register(disposer: () => void): void {
+            this.track(disposer)
+        }
+    }
+
+    it("annotates subclass state while leaving the base's bookkeeping invisible", () => {
+        const vm = new CounterVM()
+
+        expect(isObservableProp(vm, "count")).toBe(true)
+        // `#` private fields are unreachable by `Reflect.ownKeys`, so the annotation walk never sees the
+        // disposer list or the abort controller.
+        expect(Object.keys(vm)).toEqual(["count"])
+    })
+
+    it("leaves the four sealed hooks unannotated, and still callable", () => {
+        const vm = new CounterVM()
+
+        for (const hook of HOOKS) {
+            expect(isObservableProp(vm, hook)).toBe(false)
+            // Still the base's own implementation — nothing rebound it on the way through.
+            expect(vm[hook]).toBe(ViewModel.prototype[hook])
+        }
+
+        expect(() => drive(vm).onModuleDestroy()).not.toThrow()
+    })
+
+    it("keeps disposal working after the base's methods are annotated as actions", async () => {
+        const dispose = vi.fn()
+        const vm = new CounterVM()
+
+        vm.register(dispose)
+        vm.inc()
+        await drive(vm).onModuleDestroy()
+
+        expect(vm.count).toBe(2)
+        expect(dispose).toHaveBeenCalledTimes(1)
     })
 })

@@ -1,3 +1,8 @@
+// View model
+// ========================================
+
+export { ViewModel } from "./ViewModel.js"
+
 // Public types
 // ========================================
 

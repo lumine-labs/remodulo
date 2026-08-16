@@ -1,0 +1,10 @@
+{
+    "extends": "../../tsconfig.base.json",
+    "compilerOptions": {
+        // Not hoisted into tsconfig.base.json: `baseUrl` resolves against the file that declares it,
+        // so hoisting would repoint it at the repo root.
+        "baseUrl": "."
+    },
+    "include": ["src/**/*.ts"],
+    "exclude": ["dist", "node_modules"]
+}

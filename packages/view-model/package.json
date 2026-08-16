@@ -1,7 +1,7 @@
 {
-    "name": "@remodulo/mobx",
-    "version": "0.5.0",
-    "description": "MobX companion for @remodulo/react",
+    "name": "@remodulo/view-model",
+    "version": "0.1.0",
+    "description": "The remodulo view model base class: sealed lifecycle hooks, mount-scoped disposers and abort signal. Zero dependencies, reactivity-agnostic.",
     "license": "MIT",
     "author": "Egor Arkhipov (Lumine Labs)",
     "repository": {
@@ -12,12 +12,11 @@
         "access": "public"
     },
     "keywords": [
-        "react",
-        "dependency-injection",
-        "di",
-        "mobx",
+        "view-model",
+        "lifecycle",
+        "disposer",
+        "abortcontroller",
         "remodulo",
-        "props-adapter",
         "typescript",
         "frontend-architecture"
     ],
@@ -50,23 +49,11 @@
         "test:coverage": "vitest run --coverage",
         "prepack": "pnpm run build"
     },
-    "peerDependencies": {
-        "@remodulo/react": "workspace:^",
-        "mobx": "^6.0.0 || ^7.0.0"
-    },
     "devDependencies": {
         "@remodulo/container": "workspace:*",
         "@remodulo/react": "workspace:*",
-        "@remodulo/view-model": "workspace:*",
-        "@testing-library/jest-dom": "^6.9.1",
-        "@testing-library/react": "^16.3.2",
         "@types/node": "^25.5.0",
-        "@types/react": "^19.2.14",
         "@vitest/coverage-v8": "^4.1.0",
-        "jsdom": "^29.0.0",
-        "mobx": "^7.0.0",
-        "react": "^18.0.0 || ^19.0.0",
-        "react-dom": "^19.2.4",
         "rimraf": "^6.1.3",
         "typescript": "^5.9.3",
         "vitest": "^4.1.0"
